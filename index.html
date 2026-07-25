@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iMessage 27 | Portal Gateway</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    /* Specific loading portal styling */
+    .portal-logo {
+      font-size: 48px;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 24px;
+      letter-spacing: -2px;
+      background: linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.4) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: pulse-glow 2s infinite ease-in-out;
+    }
+    
+    .spinner-ring {
+      width: 44px;
+      height: 44px;
+      border: 3px solid rgba(255,255,255,0.05);
+      border-top-color: var(--accent-color);
+      border-radius: 50%;
+      animation: spin-loop 1s infinite linear;
+      margin: 0 auto;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { opacity: 0.7; transform: scale(0.98); }
+      50% { opacity: 1; transform: scale(1.02); }
+    }
+    @keyframes spin-loop {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Aurora Background Blobs -->
+  <div class="aurora-bg">
+    <div class="aurora-blob blob-1"></div>
+    <div class="aurora-blob blob-2"></div>
+    <div class="aurora-blob blob-3"></div>
+    <div class="aurora-blob blob-4"></div>
+  </div>
+
+  <div class="auth-container glass-panel" style="text-align: center; width: 340px;">
+    <div class="auth-logo" style="animation: pulse-glow 2s infinite;">
+      <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
+    </div>
+    <div class="portal-logo">iMessage 27</div>
+    <div class="spinner-ring"></div>
+    <p style="font-size: 13px; color: var(--text-secondary); margin-top: 20px; font-weight: 500;">Securing spatial channel...</p>
+  </div>
+
+  <!-- CDN scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="script.js"></script>
+</body>
+</html>

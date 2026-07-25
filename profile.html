@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iMessage 27 | Edit Profile</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Aurora Background Blobs -->
+  <div class="aurora-bg">
+    <div class="aurora-blob blob-1"></div>
+    <div class="aurora-blob blob-2"></div>
+    <div class="aurora-blob blob-3"></div>
+    <div class="aurora-blob blob-4"></div>
+  </div>
+
+  <div class="profile-card glass-panel">
+    <div class="auth-header" style="margin-bottom: 25px;">
+      <h1 class="auth-title">My Profile</h1>
+      <p class="auth-subtitle">Customize your spatial presence card</p>
+    </div>
+
+    <form id="profile-form">
+      <div class="profile-avatar-row">
+        <input type="file" id="avatar-file-input" style="display: none;" accept="image/*">
+        <div class="profile-avatar-container" id="profile-avatar-container">
+          <!-- Filled dynamically by JavaScript -->
+        </div>
+        <p style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Click avatar circle to upload photo</p>
+      </div>
+
+      <div class="profile-grid">
+        <div class="glass-input-wrapper">
+          <label class="glass-label" for="profile-fullname">Full Name</label>
+          <input type="text" id="profile-fullname" class="glass-input" required>
+        </div>
+
+        <div class="glass-input-wrapper">
+          <label class="glass-label" for="profile-username">Username</label>
+          <input type="text" id="profile-username" class="glass-input" required>
+        </div>
+
+        <div class="glass-input-wrapper">
+          <label class="glass-label" for="profile-userid">User ID</label>
+          <input type="text" id="profile-userid" class="glass-input" style="opacity: 0.8; font-weight: 700; text-align: center;" readonly title="Spatial identity token">
+        </div>
+
+        <div class="glass-input-wrapper">
+          <label class="glass-label" for="profile-status">Presence Status</label>
+          <select id="profile-status" class="glass-input" style="appearance: none; cursor: pointer;">
+            <option value="Online">Online</option>
+            <option value="Away">Away</option>
+            <option value="Do Not Disturb">Do Not Disturb</option>
+            <option value="Offline">Offline</option>
+          </select>
+        </div>
+
+        <div class="glass-input-wrapper grid-span-all">
+          <label class="glass-label" for="profile-bio">Bio Status</label>
+          <textarea id="profile-bio" class="glass-input" style="resize: none; height: 90px; border-radius: 18px;" placeholder="Describe your spatial designs..."></textarea>
+        </div>
+      </div>
+
+      <div id="profile-error" style="color: #ff3b30; font-size: 13px; text-align: center; margin-bottom: 20px; font-weight: 500; min-height: 18px;"></div>
+
+      <button type="submit" class="btn-primary">
+        <span>Save Changes</span>
+        <svg viewBox="0 0 24 24" style="width: 18px; height: 18px; fill: currentColor;"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
+      </button>
+    </form>
+  </div>
+
+  <!-- CDN scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="script.js"></script>
+</body>
+</html>
