@@ -1471,7 +1471,31 @@ async function initApp() {
   if (page === "profile.html") initProfilePage();
   if (page === "settings.html") initSettingsPage();
   if (page === "index.html" || page === "") {
-    window.MotionSystem.navigate(currentUser ? "messenger.html" : "login.html");
+    const targetPage = currentUser ? "messenger.html" : "login.html";
+    const isPhoneViewport = window.matchMedia("(max-width: 480px)").matches;
+    const introVideo = document.getElementById(
+      isPhoneViewport ? "mobile-intro-video" : "desktop-intro-video"
+    );
+
+    if (introVideo) {
+      // Let the opening animation play out, then continue the normal
+      // route. "ended"/"error" cover the happy path and any playback
+      // failure; the timeout is a safety net in case autoplay is
+      // blocked entirely and neither event ever fires.
+      let advanced = false;
+      const proceed = () => {
+        if (advanced) return;
+        advanced = true;
+        window.MotionSystem.navigate(targetPage);
+      };
+      introVideo.addEventListener("ended", proceed, { once: true });
+      introVideo.addEventListener("error", proceed, { once: true });
+      window.setTimeout(proceed, 6000);
+      introVideo.play().catch(proceed);
+    } else {
+      // No matching intro video found: unchanged, immediate route.
+      window.MotionSystem.navigate(targetPage);
+    }
   }
 }
 
