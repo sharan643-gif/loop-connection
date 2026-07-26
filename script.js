@@ -198,6 +198,7 @@ const SUPABASE_CONFIG = {
 // State variables
 let currentUser = null;
 let activeChatUserId = null;
+let activeGroupId = null; // set when a group thread is open instead of a 1:1 DM
 let isSupabaseActive = false;
 let supabaseClient = null;
 const mobileViewQuery = window.matchMedia("(max-width: 480px)");
@@ -211,9 +212,24 @@ mobileViewQuery.addEventListener("change", (e) => {
     document.getElementById("main-app-card")?.classList.remove("show-sidebar");
   }
   if (activeChatUserId) startChatSession(activeChatUserId);
+  else if (activeGroupId) startGroupChatSession(activeGroupId);
 });
 let typingTimeout = null;
 let activeReplyMessageId = null;
+
+// Voice message recording state (MediaRecorder-backed, shared across
+// whichever chat template — DM or group — is currently rendered)
+let voiceRecorder = null;
+let voiceChunks = [];
+let voiceStream = null;
+let voiceRecordStartTime = null;
+let voiceRecordTimerInterval = null;
+let isRecordingVoice = false;
+
+// Shared <audio> element reused for playback of every voice-note bubble,
+// so only one voice message ever plays at a time.
+let sharedVoicePlayer = null;
+let sharedVoicePlayerBtn = null;
 
 // Accent Colors Mapping
 const ACCENT_COLORS = {
@@ -312,6 +328,47 @@ const DEFAULT_REQUESTS = [
   }
 ];
 
+// Seed Groups
+const DEFAULT_GROUPS = [
+  {
+    id: "GRP1001",
+    name: "Design Crew",
+    avatar: `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50" fill="#ff9500"/><text x="50" y="58" font-size="26" font-family="sans-serif" font-weight="bold" fill="white" text-anchor="middle">DC</text></svg>`,
+    createdBy: "AG10283",
+    memberIds: ["AG10283", "AG94852", "AG77541"],
+    createdAt: Date.now() - 3600000 * 5
+  }
+];
+
+// Seed Group Messages — same shape as DEFAULT_MESSAGES, but groupId is set
+// and receiverId is null since a group message has many recipients.
+const DEFAULT_GROUP_MESSAGES = [
+  {
+    id: "gmsg_seed_1",
+    senderId: "AG94852",
+    receiverId: null,
+    groupId: "GRP1001",
+    content: "Welcome to the Design Crew group chat!",
+    timestamp: Date.now() - 3600000 * 4,
+    status: "sent",
+    reaction: null,
+    edited: false,
+    replyTo: null
+  },
+  {
+    id: "gmsg_seed_2",
+    senderId: "AG77541",
+    receiverId: null,
+    groupId: "GRP1001",
+    content: "Excited to be here 🚀",
+    timestamp: Date.now() - 3600000 * 3,
+    status: "sent",
+    reaction: null,
+    edited: false,
+    replyTo: null
+  }
+];
+
 /* ------------------------------------------------------------- */
 /* DATABASE ADAPTER (Dynamic backend selector)                   */
 /* ------------------------------------------------------------- */
@@ -323,10 +380,13 @@ const DBAdapter = {
       localStorage.setItem("ios27_users", JSON.stringify(DEFAULT_USERS));
     }
     if (!localStorage.getItem("ios27_messages")) {
-      localStorage.setItem("ios27_messages", JSON.stringify(DEFAULT_MESSAGES));
+      localStorage.setItem("ios27_messages", JSON.stringify([...DEFAULT_MESSAGES, ...DEFAULT_GROUP_MESSAGES]));
     }
     if (!localStorage.getItem("ios27_requests")) {
       localStorage.setItem("ios27_requests", JSON.stringify(DEFAULT_REQUESTS));
+    }
+    if (!localStorage.getItem("ios27_groups")) {
+      localStorage.setItem("ios27_groups", JSON.stringify(DEFAULT_GROUPS));
     }
     if (!localStorage.getItem("ios27_settings")) {
       const defaultSettings = {
@@ -335,6 +395,7 @@ const DBAdapter = {
         animations: true,
         background: "aurora",
         accentColor: "blue",
+        glassTint: 0.5,
         supabaseUrl: "",
         supabaseKey: ""
       };
@@ -411,6 +472,15 @@ const DBAdapter = {
   },
 
   async getUserById(id) {
+    // Reuse the shared, already-warm users cache when we have one — this is
+    // hit on the critical path of opening a chat, right after the friends/
+    // threads list just fetched (and cached) the exact same data. Paying
+    // for a second network round trip there is pure latency with nothing
+    // to show for it.
+    if (isSupabaseActive && this._usersCache && (Date.now() - this._usersCacheTime) < 2000) {
+      const cached = this._usersCache.find(u => u.id === id);
+      if (cached) return cached;
+    }
     if (isSupabaseActive) {
       const { data, error } = await supabaseClient.from("profiles").select("*").eq("id", id).maybeSingle();
       if (!error && data) return this.mapSupabaseUser(data);
@@ -572,6 +642,126 @@ const DBAdapter = {
     }
   },
 
+  // Group Chat APIs
+  async createGroup({ name, memberIds, createdBy }) {
+    const trimmed = name.trim();
+    const words = trimmed.split(/\s+/);
+    const initials = words.length === 1
+      ? trimmed.substring(0, 2).toUpperCase()
+      : (words[0][0] + words[1][0]).toUpperCase();
+    const randomColor = ["#2f80ed", "#34c759", "#af52de", "#ff2d55", "#ff9500"][Math.floor(Math.random() * 5)];
+    const avatarSVG = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50" fill="${randomColor}"/><text x="50" y="58" font-size="26" font-family="sans-serif" font-weight="bold" fill="white" text-anchor="middle">${initials}</text></svg>`;
+
+    const group = {
+      id: "GRP" + Date.now(),
+      name: trimmed,
+      avatar: avatarSVG,
+      createdBy,
+      memberIds,
+      createdAt: Date.now()
+    };
+
+    if (isSupabaseActive) {
+      const { error } = await supabaseClient.from("groups").insert([{
+        id: group.id,
+        name: group.name,
+        avatar: group.avatar,
+        created_by: group.createdBy,
+        member_ids: group.memberIds,
+        created_at: new Date(group.createdAt).toISOString()
+      }]);
+      if (error) {
+        console.error("Supabase insert into 'groups' failed:", error);
+        throw error;
+      }
+    } else {
+      const groups = JSON.parse(localStorage.getItem("ios27_groups")) || [];
+      groups.push(group);
+      localStorage.setItem("ios27_groups", JSON.stringify(groups));
+    }
+    return group;
+  },
+
+  async getGroups() {
+    if (isSupabaseActive) {
+      const { data, error } = await supabaseClient.from("groups").select("*");
+      if (!error) return data.map(g => this.mapSupabaseGroup(g));
+    }
+    return JSON.parse(localStorage.getItem("ios27_groups")) || [];
+  },
+
+  async getUserGroups(userId) {
+    const groups = await this.getGroups();
+    return groups.filter(g => (g.memberIds || []).includes(userId));
+  },
+
+  async getGroupById(id) {
+    if (isSupabaseActive) {
+      const { data, error } = await supabaseClient.from("groups").select("*").eq("id", id).maybeSingle();
+      if (!error && data) return this.mapSupabaseGroup(data);
+    }
+    const groups = await this.getGroups();
+    return groups.find(g => g.id === id) || null;
+  },
+
+  async updateGroup(id, updates) {
+    if (isSupabaseActive) {
+      const dbUpdates = {};
+      if (updates.name !== undefined) dbUpdates.name = updates.name;
+      if (updates.avatar !== undefined) dbUpdates.avatar = updates.avatar;
+      if (updates.memberIds !== undefined) dbUpdates.member_ids = updates.memberIds;
+      const { error } = await supabaseClient.from("groups").update(dbUpdates).eq("id", id);
+      if (error) throw error;
+    } else {
+      const groups = JSON.parse(localStorage.getItem("ios27_groups")) || [];
+      const idx = groups.findIndex(g => g.id === id);
+      if (idx !== -1) {
+        groups[idx] = { ...groups[idx], ...updates };
+        localStorage.setItem("ios27_groups", JSON.stringify(groups));
+      }
+    }
+  },
+
+  async addGroupMembers(groupId, newMemberIds) {
+    const group = await this.getGroupById(groupId);
+    if (!group) return;
+    const merged = Array.from(new Set([...(group.memberIds || []), ...newMemberIds]));
+    await this.updateGroup(groupId, { memberIds: merged });
+  },
+
+  async removeGroupMember(groupId, memberId) {
+    const group = await this.getGroupById(groupId);
+    if (!group) return;
+    const remaining = (group.memberIds || []).filter(id => id !== memberId);
+    await this.updateGroup(groupId, { memberIds: remaining });
+  },
+
+  mapSupabaseGroup(dbGroup) {
+    return {
+      id: dbGroup.id,
+      name: dbGroup.name,
+      avatar: dbGroup.avatar,
+      createdBy: dbGroup.created_by,
+      memberIds: dbGroup.member_ids || [],
+      createdAt: dbGroup.created_at ? new Date(dbGroup.created_at).getTime() : Date.now()
+    };
+  },
+
+  // Group read-state — local-only "last viewed" marker per group, used to
+  // compute unread badges. Group messages don't have a single per-recipient
+  // "seen" flag the way 1:1 messages do (there's no one right answer to
+  // "did the group see this"), so unread tracking is per-viewer instead.
+  getGroupLastRead(groupId) {
+    const map = JSON.parse(localStorage.getItem("ios27_group_last_read")) || {};
+    return map[groupId] || 0;
+  },
+
+  setGroupLastRead(groupId, timestamp) {
+    const map = JSON.parse(localStorage.getItem("ios27_group_last_read")) || {};
+    map[groupId] = timestamp;
+    localStorage.setItem("ios27_group_last_read", JSON.stringify(map));
+  },
+
   // Messages APIs
   async getMessages(userId1, userId2) {
     if (isSupabaseActive) {
@@ -590,13 +780,18 @@ const DBAdapter = {
       const dbMsg = {
         id: msg.id,
         sender_id: msg.senderId,
-        receiver_id: msg.receiverId,
+        receiver_id: msg.receiverId || null,
+        group_id: msg.groupId || null,
         content: msg.content,
         timestamp: msg.timestamp,
         status: msg.status,
         reaction: msg.reaction || null,
         edited: msg.edited,
-        reply_to: msg.replyTo
+        reply_to: msg.replyTo,
+        attachment_url: msg.attachmentUrl || null,
+        attachment_type: msg.attachmentType || null,
+        attachment_name: msg.attachmentName || null,
+        attachment_duration: msg.attachmentDuration || null
       };
       const { error } = await supabaseClient.from("messages").insert([dbMsg]);
       if (error) throw error;
@@ -606,6 +801,43 @@ const DBAdapter = {
       localStorage.setItem("ios27_messages", JSON.stringify(msgs));
     }
     return msg;
+  },
+
+  // Uploads a File to Supabase Storage (bucket: chat-attachments) when the
+  // cloud backend is active, or inlines it as a base64 data URL under the
+  // local-storage fallback so attachments still work without any backend
+  // configured. Returns { url, type, name } ready to attach to a message.
+  async uploadAttachment(file) {
+    const isImage = file.type.startsWith("image/");
+    const isAudio = file.type.startsWith("audio/");
+    const kind = isImage ? "image" : isAudio ? "audio" : "file";
+
+    if (isSupabaseActive) {
+      const path = `${currentUser.id}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      const { error } = await supabaseClient.storage.from("chat-attachments").upload(path, file, {
+        cacheControl: "3600",
+        upsert: false
+      });
+      if (error) throw error;
+      const { data } = supabaseClient.storage.from("chat-attachments").getPublicUrl(path);
+      return { url: data.publicUrl, type: kind, name: file.name };
+    }
+
+    // Local-storage fallback: no real object storage available, so the file
+    // is embedded as a data URL. Cap it well under localStorage's ~5MB quota
+    // (shared with the rest of the app's data) so one attachment can't blow
+    // out the whole local database.
+    const MAX_LOCAL_BYTES = 1.5 * 1024 * 1024;
+    if (file.size > MAX_LOCAL_BYTES) {
+      throw new Error("File too large for local-storage mode (max 1.5MB). Connect Supabase in Settings for real uploads.");
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    return { url: dataUrl, type: kind, name: file.name };
   },
 
   async updateMessage(msgId, updates) {
@@ -628,17 +860,50 @@ const DBAdapter = {
     }
   },
 
-  // Get every message involving a user (for building the conversation-threads list)
+  // Get every 1:1 message involving a user (for building the DM part of the
+  // conversation-threads list). Group messages are excluded here — they're
+  // fetched separately via getMessagesForGroups since they belong to many
+  // recipients at once, not a single sender/receiver pair.
   async getAllMessagesForUser(userId) {
     if (isSupabaseActive) {
       const { data, error } = await supabaseClient.from("messages")
         .select("*")
+        .is("group_id", null)
         .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
         .order("timestamp", { ascending: true });
       if (!error) return data.map(m => this.mapSupabaseMessage(m));
     }
     const msgs = JSON.parse(localStorage.getItem("ios27_messages")) || [];
-    return msgs.filter(m => m.senderId === userId || m.receiverId === userId);
+    return msgs.filter(m => !m.groupId && (m.senderId === userId || m.receiverId === userId));
+  },
+
+  // Get every message inside a single group thread, oldest first.
+  async getGroupMessages(groupId) {
+    if (isSupabaseActive) {
+      const { data, error } = await supabaseClient.from("messages")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("timestamp", { ascending: true });
+      if (!error) return data.map(m => this.mapSupabaseMessage(m));
+    }
+    const msgs = JSON.parse(localStorage.getItem("ios27_messages")) || [];
+    return msgs.filter(m => m.groupId === groupId).sort((a, b) => a.timestamp - b.timestamp);
+  },
+
+  // Batched fetch across every group a user belongs to, for building the
+  // conversation-threads list without firing one query per group.
+  async getMessagesForGroups(groupIds) {
+    if (!groupIds || groupIds.length === 0) return [];
+    if (isSupabaseActive) {
+      const { data, error } = await supabaseClient.from("messages")
+        .select("*")
+        .in("group_id", groupIds)
+        .order("timestamp", { ascending: true });
+      if (!error) return data.map(m => this.mapSupabaseMessage(m));
+    }
+    const msgs = JSON.parse(localStorage.getItem("ios27_messages")) || [];
+    const idSet = new Set(groupIds);
+    return msgs.filter(m => m.groupId && idSet.has(m.groupId));
   },
 
   async getMessageById(msgId) {
@@ -696,12 +961,17 @@ const DBAdapter = {
       id: dbMsg.id,
       senderId: dbMsg.sender_id,
       receiverId: dbMsg.receiver_id,
+      groupId: dbMsg.group_id || null,
       content: dbMsg.content,
       timestamp: Number(dbMsg.timestamp),
       status: dbMsg.status,
       reaction: dbMsg.reaction,
       edited: dbMsg.edited,
-      replyTo: dbMsg.reply_to
+      replyTo: dbMsg.reply_to,
+      attachmentUrl: dbMsg.attachment_url || null,
+      attachmentType: dbMsg.attachment_type || null,
+      attachmentName: dbMsg.attachment_name || null,
+      attachmentDuration: dbMsg.attachment_duration || null
     };
   },
 
@@ -725,6 +995,11 @@ const DBAdapter = {
     document.documentElement.style.setProperty("--accent-bg", `rgba(${mapped.rgb}, 0.15)`);
     document.documentElement.style.setProperty("--glow-color", `rgba(${mapped.rgb}, 0.35)`);
     
+    // Liquid Glass transparency (iOS 27) — drives the color-mix
+    // interpolation between --panel-bg-clear and --panel-bg-tinted.
+    const tint = typeof settings.glassTint === "number" ? settings.glassTint : 0.5;
+    document.documentElement.style.setProperty("--tint-mix", tint);
+
     // Animation Speed adjustments
     if (settings.animations === false) {
       document.documentElement.style.setProperty("--transition-spring", "none");
@@ -836,10 +1111,17 @@ function showAppleNotification(title, message) {
 /* ------------------------------------------------------------- */
 
 function renderFloatingNavigation() {
-  if (!currentUser) return; // Hide navigation for logged out states
+  if (!currentUser) {
+    document.body.classList.remove("has-floating-nav");
+    return; // Hide navigation for logged out states
+  }
+
+  document.body.classList.add("has-floating-nav");
 
   const existingNav = document.getElementById("floating-island-nav");
   if (existingNav) existingNav.remove();
+
+  ensureGooFilterDefs();
 
   const nav = document.createElement("div");
   nav.id = "floating-island-nav";
@@ -851,6 +1133,10 @@ function renderFloatingNavigation() {
   const isSettings = path.includes("settings.html");
 
   nav.innerHTML = `
+    <div class="floating-nav-goo-layer" id="floating-nav-goo-layer">
+      <div class="floating-nav-indicator" id="floating-nav-indicator"></div>
+      <div class="floating-nav-hover-glass" id="floating-nav-hover-glass"></div>
+    </div>
     <a href="messenger.html" class="floating-nav-item ${isChat ? 'active' : ''}" title="Chat Messages">
       <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
     </a>
@@ -872,6 +1158,220 @@ function renderFloatingNavigation() {
     localStorage.removeItem("ios27_currentUser");
     window.MotionSystem.navigate("login.html");
   });
+
+  initFloatingNavLiquidGlass(nav);
+}
+
+/* ------------------------------------------------------------- */
+/* GOO FILTER DEFINITIONS                                        */
+/* The classic metaball recipe: blur two shapes until their alpha */
+/* fields bleed into each other, then push the alpha channel's    */
+/* contrast back up so the soft overlap snaps into one continuous */
+/* silhouette. This is what actually makes the active pill and    */
+/* the hover pill "absorb" into each other like real Liquid Glass */
+/* elements do when Apple's GlassEffectContainer groups them,     */
+/* instead of two shapes simply overlapping.                      */
+/* ------------------------------------------------------------- */
+function ensureGooFilterDefs() {
+  if (document.getElementById("nav-liquid-goo-defs")) return;
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("id", "nav-liquid-goo-defs");
+  svg.setAttribute("width", "0");
+  svg.setAttribute("height", "0");
+  svg.style.position = "absolute";
+  svg.style.overflow = "hidden";
+
+  svg.innerHTML = `
+    <defs>
+      <filter id="nav-liquid-goo">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+        <feColorMatrix in="blur" mode="matrix"
+          values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -9"
+          result="goo" />
+        <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+      </filter>
+    </defs>
+  `;
+
+  document.body.appendChild(svg);
+}
+
+/* ------------------------------------------------------------- */
+/* HOOKE'S LAW SPRING                                             */
+/* A real damped-harmonic-oscillator integrator — the same model  */
+/* iOS itself uses under the hood. Apple's SwiftUI springs are    */
+/* authored as (response, dampingFraction) rather than raw        */
+/* (stiffness, damping), so we convert with the same relationship */
+/* Apple's own spring math uses:                                  */
+/*   angularFrequency = 2π / response                             */
+/*   stiffness (k)     = mass · angularFrequency²                 */
+/*   damping   (c)     = 4π · dampingFraction · mass / response    */
+/* response  = seconds for the spring to essentially arrive       */
+/* dampingFraction = 1 is critically damped (no overshoot),       */
+/*                   < 1 allows a single settling overshoot       */
+/* ------------------------------------------------------------- */
+function springFromResponse(response, dampingFraction, mass = 1) {
+  const angularFrequency = (2 * Math.PI) / response;
+  const stiffness = mass * angularFrequency * angularFrequency;
+  const damping = (4 * Math.PI * dampingFraction * mass) / response;
+  return { stiffness, damping, mass };
+}
+
+class Spring {
+  constructor(value, response, dampingFraction, mass = 1) {
+    const { stiffness, damping } = springFromResponse(response, dampingFraction, mass);
+    this.value = value;
+    this.target = value;
+    this.velocity = 0;
+    this.stiffness = stiffness;
+    this.damping = damping;
+    this.mass = mass;
+  }
+
+  setTarget(t) {
+    this.target = t;
+  }
+
+  // Semi-implicit Euler integration of F = -k·x - c·v (Hooke's law
+  // plus linear damping). Small, fixed substeps keep it stable even
+  // if a frame drops (e.g. tab was backgrounded).
+  update(dt) {
+    const steps = dt > 0.032 ? 4 : 1;
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) {
+      const displacement = this.value - this.target;
+      const force = -this.stiffness * displacement - this.damping * this.velocity;
+      const acceleration = force / this.mass;
+      this.velocity += acceleration * h;
+      this.value += this.velocity * h;
+    }
+    return this.value;
+  }
+
+  snap(v) {
+    this.value = v;
+    this.target = v;
+    this.velocity = 0;
+  }
+
+  isSettled(eps = 0.02) {
+    return Math.abs(this.value - this.target) < eps && Math.abs(this.velocity) < eps;
+  }
+}
+
+/* ------------------------------------------------------------- */
+/* LIQUID GLASS NAV INDICATOR                                    */
+/* Two pills live behind the icons: an accent-colored one under   */
+/* whichever tab is active, and a quieter frosted one that tracks */
+/* the pointer on hover. Both are driven every frame by a real    */
+/* Hooke's-law spring rather than a canned CSS easing curve, so   */
+/* their motion actually has mass, stiffness and damping. Each    */
+/* pill also stretches along its direction of travel in           */
+/* proportion to its own spring velocity — literal liquid         */
+/* deformation, not a scripted keyframe — and relaxes back to a   */
+/* circle as it settles. When the hover pill's path brings it     */
+/* near the active pill, the shared goo filter fuses the two into */
+/* one continuous shape, exactly like Liquid Glass controls       */
+/* absorbing into each other, then lets them separate cleanly.    */
+/* ------------------------------------------------------------- */
+function initFloatingNavLiquidGlass(nav) {
+  const gooLayer = nav.querySelector("#floating-nav-goo-layer");
+  const indicatorEl = nav.querySelector("#floating-nav-indicator");
+  const hoverEl = nav.querySelector("#floating-nav-hover-glass");
+  const items = Array.from(nav.querySelectorAll(".floating-nav-item"));
+  const activeItem = items.find((el) => el.classList.contains("active"));
+
+  function centerXOf(target) {
+    const navRect = nav.getBoundingClientRect();
+    const itemRect = target.getBoundingClientRect();
+    return itemRect.left - navRect.left + itemRect.width / 2 - 25; // 25 = half pill width
+  }
+
+  const restingY = 6;
+
+  // Landing spring: settles in a single, controlled arrival —
+  // Apple's own tab-bar default is response 0.55 / dampingFraction
+  // 0.825, we use a slightly quicker response since this pill is
+  // much smaller and lighter than a full-screen transition.
+  const indicatorX = new Spring(0, 0.42, 0.82);
+  // Stretch relaxes back to neutral with no overshoot (dampingFraction
+  // 1 = critically damped) so the "liquid" elongation never wobbles.
+  const indicatorStretch = new Spring(1, 0.28, 1);
+
+  // Hover pill: Apple's interactiveSpring default (0.15 / 0.86),
+  // tuned for something that must feel instantly responsive to the
+  // cursor rather than a settled destination.
+  const hoverX = new Spring(0, 0.22, 0.88);
+  const hoverStretch = new Spring(1, 0.24, 1);
+  let hoverActive = false;
+
+  if (activeItem) {
+    indicatorX.snap(centerXOf(activeItem));
+    indicatorEl.style.opacity = "0";
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        indicatorEl.style.transition = "opacity 0.35s ease";
+        indicatorEl.style.opacity = "1";
+      });
+    });
+  } else {
+    indicatorEl.style.display = "none";
+  }
+  hoverX.snap(indicatorX.value);
+
+  items.forEach((item) => {
+    item.addEventListener("pointerenter", () => {
+      if (item.classList.contains("active")) return;
+      hoverActive = true;
+      hoverEl.classList.add("is-visible");
+      hoverX.setTarget(centerXOf(item));
+    });
+    item.addEventListener("pointerleave", () => {
+      hoverActive = false;
+      hoverEl.classList.remove("is-visible");
+    });
+  });
+
+  window.addEventListener("resize", () => {
+    if (activeItem) indicatorX.setTarget(centerXOf(activeItem));
+  });
+
+  // A max stretch of ~22% and a matching ~8% squash reads as a real,
+  // slightly elastic material without tipping into cartoonish jelly.
+  function applyLiquidTransform(el, spring, stretchSpring) {
+    const speed = Math.abs(spring.velocity);
+    const stretchTarget = 1 + Math.min(speed / 900, 0.22);
+    stretchSpring.setTarget(stretchTarget);
+    const sx = stretchSpring.value;
+    const sy = 1 - (sx - 1) * 0.35; // inverse squash, subtler than the stretch
+    el.style.transform = `translate(${spring.value}px, ${restingY}px) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
+  }
+
+  let lastTime = performance.now();
+
+  function frame(now) {
+    if (!document.body.contains(nav)) return; // page navigated away / nav replaced
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+
+    if (activeItem) {
+      indicatorX.update(dt);
+      indicatorStretch.update(dt);
+      applyLiquidTransform(indicatorEl, indicatorX, indicatorStretch);
+    }
+
+    if (hoverActive || !hoverX.isSettled()) {
+      hoverX.update(dt);
+      hoverStretch.update(dt);
+      applyLiquidTransform(hoverEl, hoverX, hoverStretch);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
 }
 
 /* ------------------------------------------------------------- */
@@ -1135,16 +1635,35 @@ function initSignupPage() {
 // 3. MESSENGER PAGE CONTROLLER
 function initMessengerPage() {
   loadFriendsList();
+  loadGroupsList();
   loadConversationsList();
   renderPendingFriendRequests();
   setupContextMenus();
+  setupVoicePlayback();
+
+  document.getElementById("create-group-btn")?.addEventListener("click", openCreateGroupModal);
   
   // Realtime updates poller simulation
-  setInterval(() => {
-    syncActiveThread();
-    loadFriendsList();
-    renderPendingFriendRequests();
-    loadConversationsList();
+  let pollInFlight = false;
+  setInterval(async () => {
+    // If the last poll tick is still resolving (slow connection, tab was
+    // backgrounded, etc.) skip this one rather than stacking a second
+    // burst of requests on top of it — that pileup is exactly what was
+    // making an in-the-moment click (like opening a chat) queue up behind
+    // a wall of background traffic instead of firing immediately.
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      await Promise.allSettled([
+        activeGroupId ? syncActiveGroupThread() : syncActiveThread(),
+        loadFriendsList(),
+        loadGroupsList(),
+        renderPendingFriendRequests(),
+        loadConversationsList()
+      ]);
+    } finally {
+      pollInFlight = false;
+    }
   }, 4000);
 
   // Global user searching listener
@@ -1369,6 +1888,262 @@ async function loadFriendsList() {
   }
 }
 
+let _lastGroupsSnapshot = null;
+// Groups Panel (sidebar)
+async function loadGroupsList() {
+  const container = document.getElementById("groups-list-container");
+  if (!container) return;
+
+  try {
+    const groups = await DBAdapter.getUserGroups(currentUser.id);
+
+    if (groups.length === 0) {
+      if (_lastGroupsSnapshot === "") return;
+      _lastGroupsSnapshot = "";
+      container.innerHTML = `<div style="font-size:12px; color:var(--text-muted); text-align:center; padding:16px 0;">No groups yet</div>`;
+      return;
+    }
+
+    const snapshot = JSON.stringify(groups.map(g => g.id + g.name + g.avatar + (g.memberIds || []).length));
+    if (snapshot === _lastGroupsSnapshot) return;
+    _lastGroupsSnapshot = snapshot;
+
+    container.classList.add("perf-list");
+    container.innerHTML = "";
+    for (const group of groups) {
+      const div = document.createElement("div");
+      div.className = "friend-item perf-row reveal";
+      div.innerHTML = `
+        <div class="avatar-wrapper">
+          <div class="avatar-img">${group.avatar}</div>
+        </div>
+        <div class="friend-info">
+          <div class="friend-name">${group.name}</div>
+          <div class="friend-status">${(group.memberIds || []).length} members</div>
+        </div>
+      `;
+
+      div.addEventListener("click", () => {
+        document.getElementById("main-app-card")?.classList.remove("show-sidebar");
+        startGroupChatSession(group.id);
+      });
+
+      container.appendChild(div);
+    }
+    window.MotionSystem.refreshReveal(container);
+  } catch (e) {
+    console.error("Error loading groups list:", e);
+  }
+}
+
+// New Group creation modal — built dynamically the same way the app already
+// builds the Apple notification and context menu, so it doesn't need any
+// dedicated markup sitting hidden in the page HTML.
+async function openCreateGroupModal() {
+  document.getElementById("group-modal-overlay")?.remove();
+
+  const users = await DBAdapter.getUsers();
+  const usersById = new Map(users.map(u => [u.id, u]));
+  const friends = (currentUser.friends || []).map(id => usersById.get(id)).filter(Boolean);
+
+  const overlay = document.createElement("div");
+  overlay.id = "group-modal-overlay";
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 class="modal-title">New Group</h2>
+        <div class="chat-action-btn modal-close-btn" id="close-group-modal">
+          <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </div>
+      </div>
+
+      <div class="glass-input-wrapper" style="margin-bottom: 18px;">
+        <label class="glass-label" for="new-group-name">Group Name</label>
+        <input type="text" id="new-group-name" class="glass-input" placeholder="e.g. Weekend Trip" maxlength="40" autocomplete="off">
+      </div>
+
+      <span class="section-label">Add Friends</span>
+      <div class="modal-member-list" id="group-member-picker">
+        ${friends.length === 0
+          ? `<div style="font-size:12px; color:var(--text-muted); text-align:center; padding:20px 0;">Add some friends first to start a group.</div>`
+          : friends.map(f => `
+            <label class="member-pick-row" for="pick-${f.id}">
+              <input type="checkbox" id="pick-${f.id}" value="${f.id}" class="group-member-checkbox">
+              <div class="avatar-wrapper" style="width:32px; height:32px;">
+                <div class="avatar-img">${f.avatar}</div>
+              </div>
+              <div class="result-info">
+                <div class="result-name">${f.fullName}</div>
+                <div class="result-id">${f.id}</div>
+              </div>
+            </label>
+          `).join("")
+        }
+      </div>
+
+      <div id="group-modal-error" style="color:#ff3b30; font-size:12px; text-align:center; min-height:16px; margin-top:12px;"></div>
+
+      <button class="btn-primary" id="submit-create-group" style="margin-top:12px;" ${friends.length < 2 ? "disabled" : ""}>
+        <span>Create Group</span>
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("show"));
+
+  const close = () => overlay.remove();
+  document.getElementById("close-group-modal").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+  document.getElementById("submit-create-group")?.addEventListener("click", async () => {
+    const nameInput = document.getElementById("new-group-name");
+    const name = nameInput.value.trim();
+    const errorEl = document.getElementById("group-modal-error");
+    errorEl.innerText = "";
+
+    const picked = Array.from(document.querySelectorAll(".group-member-checkbox:checked")).map(cb => cb.value);
+
+    if (!name) {
+      errorEl.innerText = "Please enter a group name.";
+      return;
+    }
+    if (picked.length < 2) {
+      errorEl.innerText = "Select at least 2 friends to start a group.";
+      return;
+    }
+
+    try {
+      const memberIds = Array.from(new Set([currentUser.id, ...picked]));
+      const group = await DBAdapter.createGroup({ name, memberIds, createdBy: currentUser.id });
+      close();
+      showAppleNotification("Group Created", `"${group.name}" is ready with ${memberIds.length} members.`);
+      _lastGroupsSnapshot = null;
+      _lastConversationsSnapshot = null;
+      await loadGroupsList();
+      document.getElementById("main-app-card")?.classList.remove("show-sidebar");
+      startGroupChatSession(group.id);
+    } catch (e) {
+      console.error("Create group failed:", e);
+      const reason = (e && (e.message || e.error_description || e.details)) || "";
+      errorEl.innerText = reason
+        ? `Failed to create group: ${reason}`
+        : "Failed to create group. Please try again.";
+    }
+  });
+}
+
+// Group Info modal — view members, add friends who aren't in the group yet,
+// or leave the group entirely.
+async function openGroupInfoModal(groupId) {
+  document.getElementById("group-modal-overlay")?.remove();
+
+  const [group, users] = await Promise.all([DBAdapter.getGroupById(groupId), DBAdapter.getUsers()]);
+  if (!group) return;
+  const usersById = new Map(users.map(u => [u.id, u]));
+  const members = (group.memberIds || []).map(id => usersById.get(id)).filter(Boolean);
+  const nonMembers = (currentUser.friends || [])
+    .map(id => usersById.get(id))
+    .filter(f => f && !(group.memberIds || []).includes(f.id));
+
+  const overlay = document.createElement("div");
+  overlay.id = "group-modal-overlay";
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 class="modal-title">${group.name}</h2>
+        <div class="chat-action-btn modal-close-btn" id="close-group-modal">
+          <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </div>
+      </div>
+
+      <span class="section-label">${members.length} Members</span>
+      <div class="modal-member-list">
+        ${members.map(m => `
+          <div class="member-pick-row" style="cursor:default;">
+            <div class="avatar-wrapper" style="width:32px; height:32px;">
+              <div class="avatar-img">${m.avatar}</div>
+            </div>
+            <div class="result-info">
+              <div class="result-name">${m.fullName}${m.id === group.createdBy ? ' <span style="color:var(--accent-color); font-size:10px; font-weight:700;">· Admin</span>' : ''}${m.id === currentUser.id ? ' (You)' : ''}</div>
+              <div class="result-id">${m.id}</div>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+
+      ${nonMembers.length > 0 ? `
+        <span class="section-label" style="margin-top: 20px;">Add Friends</span>
+        <div class="modal-member-list" id="group-add-picker">
+          ${nonMembers.map(f => `
+            <label class="member-pick-row" for="addpick-${f.id}">
+              <input type="checkbox" id="addpick-${f.id}" value="${f.id}" class="group-add-checkbox">
+              <div class="avatar-wrapper" style="width:32px; height:32px;">
+                <div class="avatar-img">${f.avatar}</div>
+              </div>
+              <div class="result-info">
+                <div class="result-name">${f.fullName}</div>
+                <div class="result-id">${f.id}</div>
+              </div>
+            </label>
+          `).join("")}
+        </div>
+        <button class="btn-primary" id="submit-add-members" style="margin-top:14px;">
+          <span>Add Selected</span>
+        </button>
+      ` : ""}
+
+      <button class="btn-primary" id="leave-group-btn" style="margin-top:16px; background:rgba(255,59,48,0.15); color:#ff3b30; box-shadow:none;">
+        <span>Leave Group</span>
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("show"));
+
+  const close = () => overlay.remove();
+  document.getElementById("close-group-modal").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+  document.getElementById("submit-add-members")?.addEventListener("click", async () => {
+    const picked = Array.from(document.querySelectorAll(".group-add-checkbox:checked")).map(cb => cb.value);
+    if (picked.length === 0) return;
+    await DBAdapter.addGroupMembers(groupId, picked);
+    showAppleNotification("Members Added", `${picked.length} new member${picked.length > 1 ? "s" : ""} joined ${group.name}.`);
+    close();
+    _lastGroupsSnapshot = null;
+    if (activeGroupId === groupId) startGroupChatSession(groupId);
+    else loadGroupsList();
+  });
+
+  document.getElementById("leave-group-btn").addEventListener("click", async () => {
+    if (!confirm(`Leave "${group.name}"? You won't receive messages from this group anymore.`)) return;
+    await DBAdapter.removeGroupMember(groupId, currentUser.id);
+    showAppleNotification("Left Group", `You have left ${group.name}.`);
+    close();
+    _lastGroupsSnapshot = null;
+    _lastConversationsSnapshot = null;
+
+    if (activeGroupId === groupId) {
+      activeGroupId = null;
+      document.getElementById("chat-main-column").innerHTML = `
+        <div class="chat-empty-state">
+          <div class="empty-state-icon">
+            <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
+          </div>
+          <div>
+            <h3 class="empty-state-title">Your Spatial Messages</h3>
+            <p style="font-size: 13px; margin-top: 6px; opacity: 0.65;">Select a chat thread or select a contact in sidebar to begin.</p>
+          </div>
+        </div>
+      `;
+    }
+    loadGroupsList();
+    loadConversationsList();
+  });
+}
+
 let _lastConversationsSnapshot = null;
 // Conversation Threads Column
 async function loadConversationsList() {
@@ -1379,16 +2154,19 @@ async function loadConversationsList() {
     const users = await DBAdapter.getUsers();
     const usersById = new Map(users.map(u => [u.id, u]));
     const allMsgs = await DBAdapter.getAllMessagesForUser(currentUser.id);
+    const userGroups = await DBAdapter.getUserGroups(currentUser.id);
+    const groupIds = userGroups.map(g => g.id);
+    const groupMsgs = await DBAdapter.getMessagesForGroups(groupIds);
 
-    // Find who we have messaging threads with
+    // Pinned lists (shared between DM partner ids and group ids)
+    const pinnedIds = JSON.parse(localStorage.getItem("ios27_chats_pinned")) || [];
+
+    // Find who we have DM threads with
     const activePartners = new Set();
     allMsgs.forEach(m => {
       if (m.senderId === currentUser.id) activePartners.add(m.receiverId);
       if (m.receiverId === currentUser.id) activePartners.add(m.senderId);
     });
-
-    // Pinned lists
-    const pinnedIds = JSON.parse(localStorage.getItem("ios27_chats_pinned")) || [];
 
     // Derive last message + unread count per partner from the already-fetched
     // message list instead of firing an extra query per conversation.
@@ -1404,10 +2182,37 @@ async function loadConversationsList() {
       const unreadCount = msgs.filter(m => m.senderId === partnerId && m.status !== "seen").length;
 
       threads.push({
-        partner,
+        type: "dm",
+        id: partner.id,
+        title: partner.fullName,
+        avatar: partner.avatar,
+        statusDotClass: partner.status.toLowerCase() === 'online' ? '' : partner.status.toLowerCase() === 'away' ? 'away' : partner.status.toLowerCase() === 'do not disturb' ? 'dnd' : 'offline',
         lastMsg,
         unreadCount,
         pinned: pinnedIds.includes(partner.id)
+      });
+    }
+
+    // Every group the user belongs to gets a thread too, even with zero
+    // messages so far (same as friends showing up in the sidebar list
+    // before a first DM is sent).
+    for (const group of userGroups) {
+      const msgs = groupMsgs
+        .filter(m => m.groupId === group.id)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      const lastMsg = msgs[msgs.length - 1];
+      const lastRead = DBAdapter.getGroupLastRead(group.id);
+      const unreadCount = msgs.filter(m => m.senderId !== currentUser.id && m.timestamp > lastRead).length;
+
+      threads.push({
+        type: "group",
+        id: group.id,
+        title: group.name,
+        avatar: group.avatar,
+        statusDotClass: null,
+        lastMsg,
+        unreadCount,
+        pinned: pinnedIds.includes(group.id)
       });
     }
 
@@ -1423,11 +2228,12 @@ async function loadConversationsList() {
     if (threads.length === 0) {
       if (_lastConversationsSnapshot === "") return;
       _lastConversationsSnapshot = "";
-      container.innerHTML = `<div style="font-size:12px; color:var(--text-muted); text-align:center; padding:40px 0;">No active threads.<br>Select a friend in the sidebar to start typing.</div>`;
+      container.innerHTML = `<div style="font-size:12px; color:var(--text-muted); text-align:center; padding:40px 0;">No active threads.<br>Select a friend or group in the sidebar to start typing.</div>`;
       return;
     }
 
-    const snapshot = JSON.stringify(threads.map(t => t.partner.id + (t.lastMsg ? t.lastMsg.id + t.lastMsg.status : "") + t.unreadCount + t.pinned)) + activeChatUserId;
+    const activeId = activeGroupId || activeChatUserId;
+    const snapshot = JSON.stringify(threads.map(t => t.type + t.id + (t.lastMsg ? t.lastMsg.id + t.lastMsg.status : "") + t.unreadCount + t.pinned)) + activeId;
     if (snapshot === _lastConversationsSnapshot) return;
     _lastConversationsSnapshot = snapshot;
 
@@ -1435,21 +2241,32 @@ async function loadConversationsList() {
     container.innerHTML = "";
     for (const thread of threads) {
       const div = document.createElement("div");
-      div.className = `chat-thread-item perf-row reveal ${activeChatUserId === thread.partner.id ? 'active' : ''}`;
-      
+      const isActive = thread.type === "group" ? activeGroupId === thread.id : activeChatUserId === thread.id;
+      div.className = `chat-thread-item perf-row reveal ${isActive ? 'active' : ''}`;
+
       const timeStr = thread.lastMsg ? formatChatTime(thread.lastMsg.timestamp) : "";
-      const contentStr = thread.lastMsg ? thread.lastMsg.content : "No messages";
+      let contentStr = thread.lastMsg ? thread.lastMsg.content : "No messages";
+      if (thread.type === "group" && thread.lastMsg) {
+        const senderLabel = thread.lastMsg.senderId === currentUser.id
+          ? "You"
+          : (usersById.get(thread.lastMsg.senderId)?.fullName.split(" ")[0] || "Someone");
+        contentStr = `${senderLabel}: ${contentStr}`;
+      }
+
+      const badgeMarkup = thread.statusDotClass !== null
+        ? `<div class="status-dot ${thread.statusDotClass}"></div>`
+        : `<div class="group-badge-icon" title="Group chat"><svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg></div>`;
 
       div.innerHTML = `
         <div class="avatar-wrapper">
-          <div class="avatar-img">${thread.partner.avatar}</div>
-          <div class="status-dot ${thread.partner.status.toLowerCase() === 'online' ? '' : thread.partner.status.toLowerCase() === 'away' ? 'away' : thread.partner.status.toLowerCase() === 'do not disturb' ? 'dnd' : 'offline'}"></div>
+          <div class="avatar-img">${thread.avatar}</div>
+          ${badgeMarkup}
         </div>
         <div class="thread-preview">
           <div class="thread-header">
             <div class="thread-name">
               ${thread.pinned ? `<svg class="pin-icon" viewBox="0 0 24 24"><path d="M16 12V4h1v-2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>` : ""}
-              ${thread.partner.fullName}
+              ${thread.title}
             </div>
             <div class="thread-time">${timeStr}</div>
           </div>
@@ -1461,7 +2278,8 @@ async function loadConversationsList() {
       `;
 
       div.addEventListener("click", () => {
-        startChatSession(thread.partner.id);
+        if (thread.type === "group") startGroupChatSession(thread.id);
+        else startChatSession(thread.id);
       });
 
       container.appendChild(div);
@@ -1488,6 +2306,7 @@ function formatChatTime(ts) {
 // Start Chat Thread View
 async function startChatSession(friendId) {
   activeChatUserId = friendId;
+  activeGroupId = null;
   activeReplyMessageId = null;
   const replyBanner = document.getElementById("active-reply-banner");
   if (replyBanner) replyBanner.style.display = "none";
@@ -1496,7 +2315,14 @@ async function startChatSession(friendId) {
   const mainCol = document.getElementById("chat-main-column");
   if (!mainCol) return;
 
-  const partner = await DBAdapter.getUserById(friendId);
+  // Partner lookup and message fetch are independent — firing them together
+  // instead of one after another is what actually shortens the "click to
+  // first bubble on screen" time on a networked (Supabase) backend, since
+  // the two round trips now overlap instead of stacking.
+  const partnerPromise = DBAdapter.getUserById(friendId);
+  const messagesPromise = DBAdapter.getMessages(currentUser.id, friendId);
+
+  const partner = await partnerPromise;
   if (!partner) return;
 
   // Mobile layout adjustment
@@ -1545,7 +2371,8 @@ async function startChatSession(friendId) {
     <!-- Chat Footer Input -->
     <div class="chat-footer">
       <div class="chat-input-row">
-        <!-- Attachment button placeholder -->
+        <!-- Attachment button + hidden file input -->
+        <input type="file" id="chat-attachment-input" style="display:none;" accept="image/*,.pdf,.doc,.docx,.txt,.zip,.csv,video/*,audio/*">
         <button class="chat-footer-btn" id="chat-attachment-btn" title="Add Attachment">
           <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-3.31 2.69-6 6-6s6 2.69 6 6v10.5c0 4.42-3.58 8-8 8s-8-3.58-8-8V6h2v9.5c0 3.31 2.69 6 6 6s6-2.69 6-6V5c0-2.21-1.79-4-4-4s-4 1.79-4 4v12.5c0 1.1.9 2 2 2s2-.9 2-2V6h2z"/></svg>
         </button>
@@ -1576,9 +2403,18 @@ async function startChatSession(friendId) {
           </div>
         </div>
 
-        <!-- Voice mockup / Send button -->
-        <button class="chat-footer-btn" id="chat-voice-btn" title="Synthesizer Voice Ping" style="display: flex;">
-          <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+        <!-- Voice recording timer (shown only while recording) -->
+        <span class="voice-record-timer" id="voice-record-timer" style="display:none;">0:00</span>
+
+        <!-- Cancel recording button (shown only while recording) -->
+        <button class="chat-footer-btn voice-cancel-btn" id="voice-cancel-btn" title="Cancel recording" style="display:none;">
+          <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+
+        <!-- Voice message record button (tap to start, tap again to send) -->
+        <button class="chat-footer-btn" id="chat-voice-btn" title="Record voice message" style="display: flex;">
+          <svg class="icon-mic" viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" style="display:none;"><path d="M6 6h12v12H6z"/></svg>
         </button>
 
         <button class="btn-primary" id="msg-send-btn" style="width:44px; height:44px; border-radius:50%; padding:0; flex-shrink:0; display:none;" title="Send Message">
@@ -1647,11 +2483,8 @@ async function startChatSession(friendId) {
     if (e.key === "Enter") sendChatMessage();
   });
 
-  // Bind voice button click mock sound
-  voiceBtn.addEventListener("click", () => {
-    showAppleNotification("Voice synthesis", "Voice input initialized. Recording mock stream.");
-    playSynthSound("sent");
-  });
+  // Wire up real voice-message recording (mic tap to start/stop, ✕ to cancel)
+  bindVoiceButton();
 
   // Emoji picker overlay panel triggers
   const emojiTrigger = document.getElementById("emoji-trigger-btn");
@@ -1681,44 +2514,340 @@ async function startChatSession(friendId) {
     document.getElementById("active-reply-banner").style.display = "none";
   });
 
+  // Attachment button trigger
+  bindAttachmentButton();
+
   // Populate active messages viewport
-  await syncActiveThread();
+  await syncActiveThread(messagesPromise);
+  // Let the browser paint the thread first — the conversations-list
+  // rebuild is heavier (users + all messages + all groups) and doesn't
+  // need to delay what the person is actually waiting to see.
+  requestAnimationFrame(() => loadConversationsList());
+}
+
+// Start Group Chat Thread View
+async function startGroupChatSession(groupId) {
+  activeGroupId = groupId;
+  activeChatUserId = null;
+  activeReplyMessageId = null;
+  const existingBanner = document.getElementById("active-reply-banner");
+  if (existingBanner) existingBanner.style.display = "none";
+
+  const mainCol = document.getElementById("chat-main-column");
+  if (!mainCol) return;
+
+  const group = await DBAdapter.getGroupById(groupId);
+  if (!group) return;
+
+  // Mobile layout adjustment
+  if (isMobileView) {
+    document.getElementById("main-app-card").classList.add("show-chat");
+  }
+
+  mainCol.innerHTML = `
+    <!-- Chat Header -->
+    <div class="chat-header-bar">
+      <div class="chat-user-profile" id="header-user-profile">
+        ${isMobileView ? `<div class="chat-action-btn" id="mobile-back-btn" style="margin-right: 8px;"><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></div>` : ""}
+        <div class="avatar-wrapper" style="width: 38px; height: 38px;">
+          <div class="avatar-img">${group.avatar}</div>
+        </div>
+        <div>
+          <div class="chat-user-name">${group.name}</div>
+          <div class="chat-user-status">${(group.memberIds || []).length} members</div>
+        </div>
+      </div>
+      <div class="chat-header-actions">
+        <button class="chat-action-btn" id="btn-pin-chat" title="Pin Conversation">
+          <svg viewBox="0 0 24 24"><path d="M16 12V4h1v-2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+        </button>
+        <button class="chat-action-btn" id="btn-view-info" title="Group Info">
+          <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Messages Viewport -->
+    <div class="chat-messages-viewport" id="messages-viewport">
+      <!-- Loaded dynamically -->
+    </div>
+
+    <!-- Active Reply Banner -->
+    <div class="active-reply-banner" id="active-reply-banner" style="display:none;">
+      <div style="display:flex; flex-direction:column; gap:2px;">
+        <span style="font-weight:700; font-size:11px; color:var(--accent-color);">Replying to Message</span>
+        <span id="reply-banner-text" style="color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:400px;"></span>
+      </div>
+      <button class="close-reply-btn" id="cancel-reply-btn">✕</button>
+    </div>
+
+    <!-- Chat Footer Input -->
+    <div class="chat-footer">
+      <div class="chat-input-row">
+        <!-- Attachment button + hidden file input -->
+        <input type="file" id="chat-attachment-input" style="display:none;" accept="image/*,.pdf,.doc,.docx,.txt,.zip,.csv,video/*,audio/*">
+        <button class="chat-footer-btn" id="chat-attachment-btn" title="Add Attachment">
+          <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-3.31 2.69-6 6-6s6 2.69 6 6v10.5c0 4.42-3.58 8-8 8s-8-3.58-8-8V6h2v9.5c0 3.31 2.69 6 6 6s6-2.69 6-6V5c0-2.21-1.79-4-4-4s-4 1.79-4 4v12.5c0 1.1.9 2 2 2s2-.9 2-2V6h2z"/></svg>
+        </button>
+
+        <!-- Input Box -->
+        <div class="chat-input-box-wrapper">
+          <input type="text" class="chat-input-box" id="msg-input" placeholder="iMessage..." autocomplete="off">
+          
+          <!-- Emoji picker trigger button -->
+          <button class="chat-footer-btn" id="emoji-trigger-btn" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); border:none; background:none; width:32px; height:32px;" title="Emojis Picker">
+            <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 4h2v2h-2V6zm-4 0h2v2H9V6zm3 11c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5z"/></svg>
+          </button>
+
+          <!-- Emoji picker panel overlay -->
+          <div class="emoji-picker-overlay" id="emoji-picker-panel">
+            <div class="emoji-select-btn">😊</div>
+            <div class="emoji-select-btn">😂</div>
+            <div class="emoji-select-btn">❤️</div>
+            <div class="emoji-select-btn">👍</div>
+            <div class="emoji-select-btn">🔥</div>
+            <div class="emoji-select-btn">😭</div>
+            <div class="emoji-select-btn">👏</div>
+            <div class="emoji-select-btn">🎉</div>
+            <div class="emoji-select-btn">🤔</div>
+            <div class="emoji-select-btn">🚀</div>
+            <div class="emoji-select-btn">👀</div>
+            <div class="emoji-select-btn">✨</div>
+          </div>
+        </div>
+
+        <!-- Voice recording timer (shown only while recording) -->
+        <span class="voice-record-timer" id="voice-record-timer" style="display:none;">0:00</span>
+
+        <!-- Cancel recording button (shown only while recording) -->
+        <button class="chat-footer-btn voice-cancel-btn" id="voice-cancel-btn" title="Cancel recording" style="display:none;">
+          <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+
+        <!-- Voice message record button (tap to start, tap again to send) -->
+        <button class="chat-footer-btn" id="chat-voice-btn" title="Record voice message" style="display: flex;">
+          <svg class="icon-mic" viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" style="display:none;"><path d="M6 6h12v12H6z"/></svg>
+        </button>
+
+        <button class="btn-primary" id="msg-send-btn" style="width:44px; height:44px; border-radius:50%; padding:0; flex-shrink:0; display:none;" title="Send Message">
+          <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:#fff;"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+
+  // Bind Pin action (pinned ids are shared between DM partner ids and group ids)
+  const pinnedIds = JSON.parse(localStorage.getItem("ios27_chats_pinned")) || [];
+  const isPinned = pinnedIds.includes(groupId);
+  const pinBtn = document.getElementById("btn-pin-chat");
+  if (isPinned) pinBtn.style.color = "var(--accent-color)";
+
+  pinBtn.addEventListener("click", () => {
+    let list = JSON.parse(localStorage.getItem("ios27_chats_pinned")) || [];
+    if (list.includes(groupId)) {
+      list = list.filter(id => id !== groupId);
+      pinBtn.style.color = "";
+      showAppleNotification("Chat Unpinned", `Removed ${group.name} from pinned conversations.`);
+    } else {
+      list.push(groupId);
+      pinBtn.style.color = "var(--accent-color)";
+      showAppleNotification("Chat Pinned", `Pinned ${group.name} at the top of conversations list.`);
+    }
+    localStorage.setItem("ios27_chats_pinned", JSON.stringify(list));
+    loadConversationsList();
+  });
+
+  // Bind Group Info click
+  document.getElementById("btn-view-info").addEventListener("click", () => openGroupInfoModal(groupId));
+
+  // Mobile Back Button binding
+  if (isMobileView) {
+    document.getElementById("mobile-back-btn").addEventListener("click", () => {
+      document.getElementById("main-app-card").classList.remove("show-chat");
+      activeGroupId = null;
+      loadConversationsList();
+    });
+  }
+
+  // Input Box keypress triggers & Dynamic Buttons switching
+  const input = document.getElementById("msg-input");
+  const sendBtn = document.getElementById("msg-send-btn");
+  const voiceBtn = document.getElementById("chat-voice-btn");
+
+  input.addEventListener("input", () => {
+    if (input.value.trim().length > 0) {
+      sendBtn.style.display = "flex";
+      voiceBtn.style.display = "none";
+    } else {
+      sendBtn.style.display = "none";
+      voiceBtn.style.display = "flex";
+    }
+
+    triggerTypingIndicator();
+  });
+
+  // Bind sending actions
+  sendBtn.addEventListener("click", sendChatMessage);
+  input.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") sendChatMessage();
+  });
+
+  // Wire up real voice-message recording (mic tap to start/stop, ✕ to cancel)
+  bindVoiceButton();
+
+  // Emoji picker overlay panel triggers
+  const emojiTrigger = document.getElementById("emoji-trigger-btn");
+  const emojiPanel = document.getElementById("emoji-picker-panel");
+
+  emojiTrigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    emojiPanel.style.display = emojiPanel.style.display === "grid" ? "none" : "grid";
+  });
+
+  document.querySelectorAll(".emoji-select-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      input.value += btn.innerText;
+      sendBtn.style.display = "flex";
+      voiceBtn.style.display = "none";
+      emojiPanel.style.display = "none";
+    });
+  });
+
+  document.addEventListener("click", () => {
+    if (emojiPanel) emojiPanel.style.display = "none";
+  });
+
+  // Cancel reply trigger
+  document.getElementById("cancel-reply-btn").addEventListener("click", () => {
+    activeReplyMessageId = null;
+    document.getElementById("active-reply-banner").style.display = "none";
+  });
+
+  // Attachment button trigger
+  bindAttachmentButton();
+
+  // Populate active messages viewport
+  await syncActiveGroupThread();
   loadConversationsList();
 }
 
 // Trigger local typing simulation
 function triggerTypingIndicator() {
-  localStorage.setItem(`ios27_typing_${currentUser.id}_${activeChatUserId}`, "true");
+  const key = activeGroupId
+    ? `ios27_typing_${currentUser.id}_group_${activeGroupId}`
+    : `ios27_typing_${currentUser.id}_${activeChatUserId}`;
+  localStorage.setItem(key, "true");
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => {
-    localStorage.removeItem(`ios27_typing_${currentUser.id}_${activeChatUserId}`);
+    localStorage.removeItem(key);
   }, 2000);
+}
+
+// mm:ss formatting for voice-note durations
+function formatDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds || 0));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+// Deterministic pseudo-waveform bars (seeded by message id) — cosmetic
+// only, since decoding real amplitude data would need Web Audio analysis.
+// Rendered twice per voice bubble (once muted, once accent-colored and
+// clipped by playback progress) so the two always line up visually.
+function buildWaveformBars(seed) {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  let bars = "";
+  const BAR_COUNT = 24;
+  for (let i = 0; i < BAR_COUNT; i++) {
+    hash = (hash * 1103515245 + 12345) >>> 0;
+    const heightPct = 25 + (hash % 75); // 25%-100% tall
+    bars += `<span class="voice-bar" style="height:${heightPct}%"></span>`;
+  }
+  return bars;
+}
+
+// Builds the markup for a message's attachment, if it has one: an inline
+// preview for images, a playable bar for voice notes, or a small
+// downloadable file chip for anything else.
+function renderAttachmentMarkup(m) {
+  if (!m.attachmentUrl) return "";
+  const safeName = (m.attachmentName || "Attachment").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  if (m.attachmentType === "image") {
+    return `
+      <a href="${m.attachmentUrl}" target="_blank" rel="noopener noreferrer" class="message-attachment-image-link">
+        <img src="${m.attachmentUrl}" alt="${safeName}" class="message-attachment-image" loading="lazy">
+      </a>
+    `;
+  }
+
+  if (m.attachmentType === "audio") {
+    const durLabel = formatDuration(m.attachmentDuration);
+    const barsHtml = buildWaveformBars(m.id);
+    return `
+      <div class="voice-message" data-audio-url="${m.attachmentUrl}" data-duration="${m.attachmentDuration || 0}">
+        <button class="voice-play-btn" title="Play voice message">
+          <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg class="icon-pause" viewBox="0 0 24 24" style="display:none;"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+        </button>
+        <div class="voice-waveform">
+          <div class="voice-bars-track voice-bars-muted">${barsHtml}</div>
+          <div class="voice-bars-progress" style="width:0%">
+            <div class="voice-bars-track voice-bars-accent">${barsHtml}</div>
+          </div>
+        </div>
+        <span class="voice-duration">${durLabel}</span>
+      </div>
+    `;
+  }
+
+  return `
+    <a href="${m.attachmentUrl}" target="_blank" rel="noopener noreferrer" download="${safeName}" class="message-attachment-file">
+      <svg viewBox="0 0 24 24" class="attachment-file-icon"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-3.31 2.69-6 6-6s6 2.69 6 6v10.5c0 4.42-3.58 8-8 8s-8-3.58-8-8V6h2v9.5c0 3.31 2.69 6 6 6s6-2.69 6-6V5c0-2.21-1.79-4-4-4s-4 1.79-4 4v12.5c0 1.1.9 2 2 2s2-.9 2-2V6h2z"/></svg>
+      <span class="attachment-file-name">${safeName}</span>
+    </a>
+  `;
 }
 
 // Sync current messaging feed
 let _lastThreadSnapshot = null;
 let _lastThreadPartnerId = null;
-async function syncActiveThread() {
+async function syncActiveThread(preloadedMessages) {
   if (!activeChatUserId) return;
 
   const viewport = document.getElementById("messages-viewport");
   if (!viewport) return;
 
   try {
-    const msgs = await DBAdapter.getMessages(currentUser.id, activeChatUserId);
-    
-    // Mark received messages as seen — batched into a single request
-    // instead of one network round trip per unread message
+    // The very first call after opening a chat can be handed a fetch
+    // that's already in flight (kicked off in parallel with the partner
+    // lookup in startChatSession) — reuse it instead of firing a second,
+    // identical query. Poll-driven calls just fetch fresh as before.
+    const msgs = preloadedMessages ? await preloadedMessages : await DBAdapter.getMessages(currentUser.id, activeChatUserId);
+
+    // Mark received messages as seen. This used to block the first paint
+    // on a full extra network round trip (write, then re-fetch to confirm)
+    // — now we flip the status locally so rendering never waits on it, and
+    // let the write happen in the background. Worst case on a failed write
+    // the next poll tick reconciles it; nothing the person sees depends on it.
     const unseenIds = msgs
       .filter(m => m.senderId === activeChatUserId && m.status !== "seen")
       .map(m => m.id);
     const updatedAny = unseenIds.length > 0;
     if (updatedAny) {
-      await DBAdapter.markMessagesSeen(unseenIds);
+      const unseenSet = new Set(unseenIds);
+      for (const m of msgs) {
+        if (unseenSet.has(m.id)) m.status = "seen";
+      }
+      DBAdapter.markMessagesSeen(unseenIds).catch(() => {});
     }
 
-    // Re-fetch if statuses updated
-    const finalMsgs = updatedAny ? await DBAdapter.getMessages(currentUser.id, activeChatUserId) : msgs;
+    const finalMsgs = msgs;
 
     // Skip the (expensive) DOM rebuild entirely if nothing actually changed
     // since the last render — this is what keeps polling from causing jank.
@@ -1748,11 +2877,15 @@ async function syncActiveThread() {
       // Handle reaction attachment rendering
       let reactionMarkup = m.reaction ? `<div class="message-reaction-tag">${m.reaction}</div>` : "";
 
+      const attachmentMarkup = renderAttachmentMarkup(m);
+      const hasAttachmentOnly = m.attachmentUrl && !m.content;
+
       html += `
         <div class="message-bubble-group reveal ${isSent ? 'sent' : 'received'}" data-msgid="${m.id}">
           ${replyMarkup}
-          <div class="message-bubble">
-            ${m.content}
+          <div class="message-bubble ${hasAttachmentOnly ? 'attachment-only' : ''}">
+            ${attachmentMarkup}
+            ${m.content ? `<div class="message-text">${m.content}</div>` : ''}
             ${reactionMarkup}
           </div>
           <div class="message-meta">
@@ -1789,22 +2922,139 @@ async function syncActiveThread() {
   }
 }
 
-// Send active message
-async function sendChatMessage() {
+// Sync the active group's message feed. Group messages don't carry a
+// meaningful single "seen" state (there's no one right answer for whether
+// a group of people has "seen" something), so read tracking here is a
+// local last-viewed timestamp instead of per-message status flips.
+let _lastGroupThreadSnapshot = null;
+let _lastGroupThreadId = null;
+async function syncActiveGroupThread() {
+  if (!activeGroupId) return;
+
+  const viewport = document.getElementById("messages-viewport");
+  if (!viewport) return;
+
+  try {
+    const [msgs, group, users] = await Promise.all([
+      DBAdapter.getGroupMessages(activeGroupId),
+      DBAdapter.getGroupById(activeGroupId),
+      DBAdapter.getUsers()
+    ]);
+    if (!group) return;
+    const usersById = new Map(users.map(u => [u.id, u]));
+
+    // Mark as read while this thread is the one on screen
+    if (msgs.length > 0) {
+      DBAdapter.setGroupLastRead(activeGroupId, msgs[msgs.length - 1].timestamp);
+    }
+
+    const peerTypingKeys = (group.memberIds || []).filter(id => id !== currentUser.id);
+    const someoneTyping = peerTypingKeys.some(id => localStorage.getItem(`ios27_typing_${id}_group_${activeGroupId}`) === "true");
+
+    const snapshot = activeGroupId + "|" + someoneTyping + "|" +
+      JSON.stringify(msgs.map(m => [m.id, m.content, m.reaction, m.edited]));
+    if (snapshot === _lastGroupThreadSnapshot && activeGroupId === _lastGroupThreadId) {
+      return;
+    }
+    _lastGroupThreadSnapshot = snapshot;
+    _lastGroupThreadId = activeGroupId;
+
+    let html = "";
+    let prevSenderId = null;
+    for (const m of msgs) {
+      const isSent = m.senderId === currentUser.id;
+      const sender = usersById.get(m.senderId);
+      const timeLabel = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      let replyMarkup = "";
+      if (m.replyTo) {
+        const parentMsg = msgs.find(p => p.id === m.replyTo) || { content: "[Deleted message]" };
+        replyMarkup = `<div class="replied-message-box">⤾ ${parentMsg.content}</div>`;
+      }
+
+      let reactionMarkup = m.reaction ? `<div class="message-reaction-tag">${m.reaction}</div>` : "";
+
+      // Only label the sender above a received bubble when it's a new
+      // sender in the run — mirrors iMessage-style group thread grouping.
+      const showSenderLabel = !isSent && sender && prevSenderId !== m.senderId;
+      const senderLabelMarkup = showSenderLabel
+        ? `<div class="group-sender-row"><div class="avatar-wrapper" style="width:20px; height:20px;"><div class="avatar-img">${sender.avatar}</div></div><span class="group-sender-name">${sender.fullName}</span></div>`
+        : "";
+
+      const attachmentMarkup = renderAttachmentMarkup(m);
+      const hasAttachmentOnly = m.attachmentUrl && !m.content;
+
+      html += `
+        <div class="message-bubble-group reveal ${isSent ? 'sent' : 'received'}" data-msgid="${m.id}">
+          ${senderLabelMarkup}
+          ${replyMarkup}
+          <div class="message-bubble ${hasAttachmentOnly ? 'attachment-only' : ''}">
+            ${attachmentMarkup}
+            ${m.content ? `<div class="message-text">${m.content}</div>` : ''}
+            ${reactionMarkup}
+          </div>
+          <div class="message-meta">
+            <span>${timeLabel}</span>
+            ${m.edited ? '<span style="font-style:italic;">(edited)</span>' : ''}
+          </div>
+        </div>
+      `;
+      prevSenderId = m.senderId;
+    }
+
+    if (someoneTyping) {
+      html += `
+        <div class="typing-indicator-bubble" id="typing-bubble">
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+        </div>
+      `;
+    }
+
+    const isAtBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 100;
+    viewport.innerHTML = html || `<div style="text-align:center; color:var(--text-muted); font-size:12px; margin-top:40px;">No messages yet. Say hello 👋</div>`;
+    window.MotionSystem.refreshReveal(viewport);
+
+    if (isAtBottom) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+
+  } catch (e) {
+    console.error("Sync active group thread error:", e);
+  }
+}
+
+// Refresh whichever thread (DM or group) is currently open
+function refreshActiveThread() {
+  return activeGroupId ? syncActiveGroupThread() : syncActiveThread();
+}
+
+// Send active message — works for both a 1:1 DM and a group thread,
+// branching only on which id (activeChatUserId vs activeGroupId) is set.
+// `attachment`, when provided, is { url, type, name } from
+// DBAdapter.uploadAttachment() — lets a message carry a file/image with
+// no text content at all.
+async function sendChatMessage(attachment) {
   const input = document.getElementById("msg-input");
   const content = input.value.trim();
-  if (!content || !activeChatUserId) return;
+  if ((!content && !attachment) || (!activeChatUserId && !activeGroupId)) return;
 
   const newMsg = {
     id: "msg_" + Date.now(),
     senderId: currentUser.id,
-    receiverId: activeChatUserId,
+    receiverId: activeGroupId ? null : activeChatUserId,
+    groupId: activeGroupId || null,
     content,
     timestamp: Date.now(),
     status: "sent",
     reaction: null,
     edited: false,
-    replyTo: activeReplyMessageId
+    replyTo: activeReplyMessageId,
+    attachmentUrl: attachment ? attachment.url : null,
+    attachmentType: attachment ? attachment.type : null,
+    attachmentName: attachment ? attachment.name : null,
+    attachmentDuration: attachment ? (attachment.duration || null) : null
   };
 
   input.value = "";
@@ -1818,12 +3068,236 @@ async function sendChatMessage() {
   try {
     await DBAdapter.sendMessage(newMsg);
     playSynthSound("sent");
-    await syncActiveThread();
+    if (activeGroupId) {
+      DBAdapter.setGroupLastRead(activeGroupId, newMsg.timestamp);
+    }
+    await refreshActiveThread();
     loadConversationsList();
 
   } catch (e) {
     showAppleNotification("Failed to transmit", "Database channel is locked.");
   }
+}
+
+// Wires the paperclip button + hidden file input for whichever chat
+// template (DM or group) is currently rendered. Uploads the chosen file
+// via DBAdapter.uploadAttachment, then sends it as a message — with the
+// typed text (if any) as the caption.
+function bindAttachmentButton() {
+  const attachBtn = document.getElementById("chat-attachment-btn");
+  const fileInput = document.getElementById("chat-attachment-input");
+  if (!attachBtn || !fileInput) return;
+
+  attachBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = ""; // reset so picking the same file twice still fires "change"
+    if (!file) return;
+
+    attachBtn.classList.add("attachment-uploading");
+    attachBtn.style.pointerEvents = "none";
+
+    try {
+      const uploaded = await DBAdapter.uploadAttachment(file);
+      await sendChatMessage(uploaded);
+    } catch (e) {
+      showAppleNotification("Attachment failed", e.message || "Could not upload that file.");
+    } finally {
+      attachBtn.classList.remove("attachment-uploading");
+      attachBtn.style.pointerEvents = "";
+    }
+  });
+}
+
+// Wires the mic button for whichever chat template (DM or group) is
+// currently rendered: first tap requests the microphone and starts a
+// MediaRecorder; a second tap stops it, uploads the clip, and sends it
+// as a voice-note message; the ✕ button stops and discards instead.
+function bindVoiceButton() {
+  const voiceBtn = document.getElementById("chat-voice-btn");
+  const cancelBtn = document.getElementById("voice-cancel-btn");
+  const timerEl = document.getElementById("voice-record-timer");
+  const attachBtn = document.getElementById("chat-attachment-btn");
+  const input = document.getElementById("msg-input");
+  if (!voiceBtn) return;
+
+  const iconMic = voiceBtn.querySelector(".icon-mic");
+  const iconStop = voiceBtn.querySelector(".icon-stop");
+
+  function setRecordingUI(active) {
+    voiceBtn.classList.toggle("recording", active);
+    if (iconMic) iconMic.style.display = active ? "none" : "";
+    if (iconStop) iconStop.style.display = active ? "" : "none";
+    if (cancelBtn) cancelBtn.style.display = active ? "flex" : "none";
+    if (timerEl) timerEl.style.display = active ? "inline" : "none";
+    if (attachBtn) attachBtn.style.display = active ? "none" : "flex";
+    if (input) input.style.display = active ? "none" : "";
+  }
+
+  function startTimer() {
+    voiceRecordStartTime = Date.now();
+    if (timerEl) timerEl.textContent = "0:00";
+    voiceRecordTimerInterval = setInterval(() => {
+      const elapsed = (Date.now() - voiceRecordStartTime) / 1000;
+      if (timerEl) timerEl.textContent = formatDuration(elapsed);
+    }, 250);
+  }
+
+  function stopTimer() {
+    clearInterval(voiceRecordTimerInterval);
+    voiceRecordTimerInterval = null;
+  }
+
+  function teardownStream() {
+    if (voiceStream) {
+      voiceStream.getTracks().forEach(track => track.stop());
+      voiceStream = null;
+    }
+    voiceRecorder = null;
+    isRecordingVoice = false;
+    stopTimer();
+    setRecordingUI(false);
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showAppleNotification("Microphone unavailable", "This browser doesn't support audio recording.");
+      return;
+    }
+    try {
+      voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      showAppleNotification("Microphone blocked", "Allow microphone access to send voice messages.");
+      return;
+    }
+
+    voiceChunks = [];
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+    voiceRecorder = mimeType ? new MediaRecorder(voiceStream, { mimeType }) : new MediaRecorder(voiceStream);
+
+    voiceRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) voiceChunks.push(e.data);
+    };
+
+    // Discard flag lets the cancel button skip the upload/send in onstop
+    // without needing a second code path.
+    voiceRecorder._cancelled = false;
+
+    voiceRecorder.onstop = async () => {
+      const wasCancelled = voiceRecorder._cancelled;
+      const durationSeconds = (Date.now() - voiceRecordStartTime) / 1000;
+      teardownStream();
+      if (wasCancelled || voiceChunks.length === 0) return;
+
+      const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      const ext = (blob.type.split("/")[1] || "webm").split(";")[0];
+      const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type });
+
+      voiceBtn.style.pointerEvents = "none";
+      voiceBtn.classList.add("attachment-uploading");
+      try {
+        const uploaded = await DBAdapter.uploadAttachment(file);
+        uploaded.duration = durationSeconds;
+        await sendChatMessage(uploaded);
+      } catch (e) {
+        showAppleNotification("Voice message failed", e.message || "Could not upload the recording.");
+      } finally {
+        voiceBtn.style.pointerEvents = "";
+        voiceBtn.classList.remove("attachment-uploading");
+      }
+    };
+
+    voiceRecorder.start();
+    isRecordingVoice = true;
+    setRecordingUI(true);
+    startTimer();
+  }
+
+  voiceBtn.addEventListener("click", () => {
+    if (!isRecordingVoice) {
+      startRecording();
+    } else if (voiceRecorder && voiceRecorder.state !== "inactive") {
+      voiceRecorder.stop();
+    }
+  });
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      if (voiceRecorder && voiceRecorder.state !== "inactive") {
+        voiceRecorder._cancelled = true;
+        voiceRecorder.stop();
+      }
+    });
+  }
+}
+
+// One-time setup for voice-note playback: a single shared <audio> element
+// handles every voice bubble via event delegation, so only one voice
+// message ever plays at once and re-rendered bubbles stay playable.
+function setupVoicePlayback() {
+  if (sharedVoicePlayer) return; // already wired (initMessengerPage can re-run)
+
+  sharedVoicePlayer = new Audio();
+
+  function resetButtonUI(btn) {
+    if (!btn) return;
+    const playIcon = btn.querySelector(".icon-play");
+    const pauseIcon = btn.querySelector(".icon-pause");
+    if (playIcon) playIcon.style.display = "";
+    if (pauseIcon) pauseIcon.style.display = "none";
+    const progress = btn.closest(".voice-message")?.querySelector(".voice-bars-progress");
+    if (progress) progress.style.width = "0%";
+  }
+
+  sharedVoicePlayer.addEventListener("timeupdate", () => {
+    if (!sharedVoicePlayerBtn || !sharedVoicePlayer.duration) return;
+    const progress = sharedVoicePlayerBtn.closest(".voice-message")?.querySelector(".voice-bars-progress");
+    if (progress) {
+      const pct = (sharedVoicePlayer.currentTime / sharedVoicePlayer.duration) * 100;
+      progress.style.width = `${pct}%`;
+    }
+  });
+
+  sharedVoicePlayer.addEventListener("ended", () => {
+    resetButtonUI(sharedVoicePlayerBtn);
+    sharedVoicePlayerBtn = null;
+  });
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".voice-play-btn");
+    if (!btn) return;
+    const container = btn.closest(".voice-message");
+    if (!container) return;
+    const url = container.dataset.audioUrl;
+
+    // Clicking the currently-playing bubble's button pauses it.
+    if (sharedVoicePlayerBtn === btn && !sharedVoicePlayer.paused) {
+      sharedVoicePlayer.pause();
+      const playIcon = btn.querySelector(".icon-play");
+      const pauseIcon = btn.querySelector(".icon-pause");
+      if (playIcon) playIcon.style.display = "";
+      if (pauseIcon) pauseIcon.style.display = "none";
+      return;
+    }
+
+    // Switching to a different bubble — reset whichever one was playing.
+    if (sharedVoicePlayerBtn && sharedVoicePlayerBtn !== btn) {
+      resetButtonUI(sharedVoicePlayerBtn);
+    }
+
+    sharedVoicePlayerBtn = btn;
+    if (sharedVoicePlayer.src !== url) {
+      sharedVoicePlayer.src = url;
+    }
+    sharedVoicePlayer.play().catch(() => {
+      showAppleNotification("Playback failed", "Couldn't play that voice message.");
+    });
+    const playIcon = btn.querySelector(".icon-play");
+    const pauseIcon = btn.querySelector(".icon-pause");
+    if (playIcon) playIcon.style.display = "none";
+    if (pauseIcon) pauseIcon.style.display = "";
+  });
 }
 
 // 4. SETUP CONTEXT MENUS & MESSAGES EDITING
@@ -1937,7 +3411,7 @@ async function renderCustomContextMenu(x, y, msgId) {
     opt.addEventListener("click", async () => {
       const emoji = opt.getAttribute("data-react");
       await DBAdapter.updateMessage(msgId, { reaction: emoji });
-      syncActiveThread();
+      refreshActiveThread();
     });
   });
 
@@ -1963,7 +3437,7 @@ async function renderCustomContextMenu(x, y, msgId) {
       const newText = prompt("Edit your message:", msgObj.content);
       if (newText && newText.trim() !== msgObj.content) {
         DBAdapter.updateMessage(msgId, { content: newText.trim(), edited: true }).then(() => {
-          syncActiveThread();
+          refreshActiveThread();
         });
       }
     });
@@ -1971,7 +3445,7 @@ async function renderCustomContextMenu(x, y, msgId) {
     document.getElementById("menu-delete-btn").addEventListener("click", () => {
       if (confirm("Are you sure you want to delete this message?")) {
         DBAdapter.deleteMessage(msgId).then(() => {
-          syncActiveThread();
+          refreshActiveThread();
         });
       }
     });
@@ -2083,6 +3557,47 @@ function initSettingsPage() {
   // Populate active theme switch
   const mode = localStorage.getItem("ios27_theme") || "dark";
   themeToggle.checked = mode === "light";
+
+  // Liquid Glass transparency — live-updates on drag, no submit needed,
+  // matching how the real Display & Brightness slider behaves.
+  const glassSlider = document.getElementById("settings-glass-tint");
+  const glassValueLabel = document.getElementById("glass-tint-value");
+  const presetClearBtn = document.getElementById("glass-preset-clear");
+  const presetTintedBtn = document.getElementById("glass-preset-tinted");
+
+  function syncGlassPresetHighlight(tint) {
+    presetClearBtn.classList.toggle("active", tint <= 0.05);
+    presetTintedBtn.classList.toggle("active", tint >= 0.95);
+  }
+
+  function applyGlassTint(tint, { persist } = { persist: false }) {
+    tint = Math.min(1, Math.max(0, tint));
+    document.documentElement.style.setProperty("--tint-mix", tint);
+    glassSlider.value = Math.round(tint * 100);
+    glassValueLabel.textContent = `${Math.round(tint * 100)}%`;
+    syncGlassPresetHighlight(tint);
+    if (persist) {
+      settings.glassTint = tint;
+      DBAdapter.saveSettings(settings);
+    }
+  }
+
+  const initialTint = typeof settings.glassTint === "number" ? settings.glassTint : 0.5;
+  applyGlassTint(initialTint);
+
+  glassSlider.addEventListener("input", () => {
+    applyGlassTint(glassSlider.value / 100, { persist: true });
+  });
+
+  presetClearBtn.addEventListener("click", () => {
+    applyGlassTint(0, { persist: true });
+    showAppleNotification("Liquid Glass", "Switched to Clear.");
+  });
+
+  presetTintedBtn.addEventListener("click", () => {
+    applyGlassTint(1, { persist: true });
+    showAppleNotification("Liquid Glass", "Switched to Tinted.");
+  });
 
   // Live-toggle Spring Animations — takes effect immediately, doesn't
   // require the Save Configurations submit.
