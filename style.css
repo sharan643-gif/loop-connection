@@ -518,17 +518,13 @@ select:focus-visible,
   text-decoration: none;
   cursor: pointer;
   position: relative;
+  z-index: 2;
   transition: var(--transition-spring);
 }
 
 .floating-nav-item:hover {
   color: var(--text-color);
-  background: rgba(255, 255, 255, 0.06);
-  transform: translateY(-3px);
-}
-
-:root.light-mode .floating-nav-item:hover {
-  background: rgba(0, 0, 0, 0.04);
+  transform: translateY(-2px);
 }
 
 .floating-nav-item:active {
@@ -537,12 +533,10 @@ select:focus-visible,
 
 .floating-nav-item.active {
   color: #ffffff;
-  background: var(--accent-color);
-  box-shadow: 0 4px 15px rgba(var(--accent-color-rgb), 0.4), inset 0 1px 0 rgba(255,255,255,0.25);
 }
 
 .floating-nav-item.active:hover {
-  transform: translateY(-3px) scale(1.04);
+  transform: translateY(-2px);
 }
 
 .floating-nav-item.active svg {
@@ -554,6 +548,68 @@ select:focus-visible,
   height: 22px;
   fill: currentColor;
   transition: var(--transition-smooth);
+}
+
+/* ---------------------------------------------------------------
+   Liquid glass nav indicator
+   Two pills live inside a shared "goo layer": an accent-colored one
+   that glides to whichever icon is active, and a lighter frosted one
+   that tracks pointer hover. Both are positioned every frame by a
+   real spring integrator in JS (Hooke's law — see the Spring class
+   in script.js), not a CSS easing curve, so their motion actually
+   carries mass, stiffness and damping the way Apple's own spring
+   timing does. The wrapping .floating-nav-goo-layer applies an SVG
+   metaball filter so that when the hover pill's path brings it near
+   the active pill, the two visually fuse into one shape and then
+   separate cleanly — the same absorption Liquid Glass controls do
+   when grouped in a GlassEffectContainer, rather than two shapes
+   simply overlapping.
+   --------------------------------------------------------------- */
+.floating-nav-goo-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  filter: url(#nav-liquid-goo);
+}
+
+.floating-nav-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  pointer-events: none;
+  will-change: transform;
+  background:
+    linear-gradient(155deg, rgba(255,255,255,0.22), rgba(255,255,255,0) 55%),
+    var(--accent-color);
+  box-shadow:
+    0 6px 16px rgba(var(--accent-color-rgb), 0.35),
+    inset 0 1px 0 rgba(255,255,255,0.3),
+    inset 0 -6px 10px -6px rgba(0,0,0,0.35);
+}
+
+.floating-nav-hover-glass {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  pointer-events: none;
+  will-change: transform;
+  opacity: 0;
+  background: rgba(255, 255, 255, 0.22);
+  transition: opacity 0.22s ease;
+}
+
+:root.light-mode .floating-nav-hover-glass {
+  background: rgba(20, 20, 26, 0.16);
+}
+
+.floating-nav-hover-glass.is-visible {
+  opacity: 1;
 }
 
 .nav-badge {
@@ -1225,6 +1281,200 @@ select:focus-visible,
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255,255,255,0.18);
 }
 
+.message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Attachments — inline image preview */
+.message-attachment-image-link {
+  display: block;
+}
+
+.message-attachment-image {
+  display: block;
+  max-width: 260px;
+  max-height: 260px;
+  width: 100%;
+  object-fit: cover;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: filter 0.2s ease;
+}
+
+.message-attachment-image:hover {
+  filter: brightness(0.92);
+}
+
+.message-attachment-image-link + .message-text {
+  margin-top: 8px;
+}
+
+.message-bubble.attachment-only {
+  padding: 6px;
+  background: transparent !important;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Attachments — generic file chip */
+.message-attachment-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  text-decoration: none;
+  max-width: 220px;
+}
+
+.message-bubble-group.sent .message-attachment-file {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.message-attachment-file:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.attachment-file-icon {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+  flex-shrink: 0;
+}
+
+.attachment-file-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Attachment button — brief "uploading" pulse while a file is in flight */
+.chat-footer-btn.attachment-uploading svg {
+  animation: attachment-pulse 0.9s infinite ease-in-out;
+}
+
+@keyframes attachment-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* Voice recording — mic button turns red and pulses while recording */
+.chat-footer-btn#chat-voice-btn.recording {
+  background: #ff3b30;
+  border-color: #ff3b30;
+  color: #fff;
+  animation: voice-record-pulse 1.4s infinite ease-in-out;
+}
+
+@keyframes voice-record-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.45); }
+  50% { box-shadow: 0 0 0 8px rgba(255, 59, 48, 0); }
+}
+
+.voice-record-timer {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ff3b30;
+  min-width: 34px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.voice-cancel-btn {
+  color: var(--text-secondary);
+}
+
+.voice-cancel-btn:hover {
+  background: rgba(255, 59, 48, 0.12);
+  color: #ff3b30;
+}
+
+/* Voice note playback bubble */
+.voice-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 6px;
+  min-width: 180px;
+}
+
+.voice-play-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: var(--transition-smooth);
+}
+
+.voice-play-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.voice-play-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.voice-waveform {
+  position: relative;
+  width: 120px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.voice-bars-track {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 120px;
+  height: 24px;
+}
+
+.voice-bars-track .voice-bar {
+  width: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.voice-bars-muted .voice-bar {
+  background: rgba(128, 128, 128, 0.35);
+}
+
+.voice-bars-accent .voice-bar {
+  background: var(--accent-color);
+}
+
+.voice-bars-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 0%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.voice-duration {
+  font-size: 11px;
+  color: inherit;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
 .message-reaction-tag {
   position: absolute;
   bottom: -10px;
@@ -1782,6 +2032,176 @@ input:checked + .slider:before {
   transform: scale(1.05);
 }
 
+/* ===== Group Chat ===== */
+
+/* Group avatar badge — replaces the online status-dot on a thread's
+   avatar when that thread is a group instead of a 1:1 DM, since a group
+   has no single presence state to show. */
+.group-badge-icon {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-color);
+  border: 2px solid #1a1a24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+:root.light-mode .group-badge-icon {
+  border-color: #fff;
+}
+
+.group-badge-icon svg {
+  width: 10px;
+  height: 10px;
+  fill: #fff;
+}
+
+/* Sender name + mini avatar shown above a received bubble inside a group
+   thread — unlike a 1:1 chat, "received" here could be any of several
+   people, so each run of consecutive messages from the same person gets
+   one label instead of repeating it per bubble. */
+.group-sender-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px 4px;
+}
+
+.group-sender-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+/* Section label with a trailing action button (e.g. the "+" New Group
+   trigger sitting beside the "Groups" sidebar heading) */
+.section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* Centered glass modal used for "New Group" creation and "Group Info" */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 5, 10, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 4500;
+  padding: 20px;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.modal-overlay.show {
+  opacity: 1;
+}
+
+.modal-card {
+  width: 420px;
+  max-width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 28px;
+  transform: scale(0.94) translateY(8px);
+  opacity: 0;
+  transition: transform 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.2), opacity 0.35s ease;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.modal-overlay.show .modal-card {
+  transform: scale(1) translateY(0);
+  opacity: 1;
+}
+
+.modal-card::-webkit-scrollbar {
+  width: 5px;
+}
+.modal-card::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.modal-title {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+}
+
+.modal-close-btn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+}
+
+.modal-close-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.modal-member-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.modal-member-list::-webkit-scrollbar {
+  width: 5px;
+}
+.modal-member-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+.member-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.member-pick-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+:root.light-mode .member-pick-row:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.group-member-checkbox,
+.group-add-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-color);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* Responsive queries */
 
 /* Mobile-only controls (Contacts drawer trigger/close, backdrop) are
@@ -2176,4 +2596,343 @@ input:checked + .slider:before {
 }
 .motion-reduced .aurora-blob {
   transform: none !important;
+}
+/* ============================================================
+   iOS 27 REFINEMENT PACK — v1.0
+   Brings the app's existing "Liquid Glass" system up to the real
+   WWDC 2026 iOS 27 spec: darkened glass rims + brighter specular
+   highlights for depth/readability, a genuine Clear <-> Tinted
+   transparency control (Settings > Liquid Glass), and true pill
+   silhouettes on buttons, search, badges and the floating island —
+   matching Apple's own controls. Nothing above this point is
+   modified — this only adds new variables and new/overridden rules.
+   ============================================================ */
+
+:root {
+  /* Clear <-> Tinted transparency control. 0 = fully clear glass,
+     1 = fully tinted/opaque (closer to the old iOS 18 look). Driven
+     live by the slider in Settings > Liquid Glass and persisted via
+     DBAdapter settings.glassTint. Defaults to a balanced midpoint. */
+  --tint-mix: 0.5;
+
+  --panel-bg-clear: rgba(20, 20, 28, 0.22);
+  --panel-bg-tinted: rgba(20, 20, 28, 0.82);
+  --nav-bg-clear: rgba(20, 20, 28, 0.4);
+  --nav-bg-tinted: rgba(20, 20, 28, 0.92);
+
+  /* Darkened rim + brighter specular tokens (the headline iOS 27
+     change: more separation between glass layers). */
+  --glass-rim-dark: rgba(0, 0, 0, 0.55);
+  --glass-specular: rgba(255, 255, 255, 0.9);
+}
+
+:root.light-mode {
+  --panel-bg-clear: rgba(255, 255, 255, 0.28);
+  --panel-bg-tinted: rgba(255, 255, 255, 0.86);
+  --nav-bg-clear: rgba(255, 255, 255, 0.45);
+  --nav-bg-tinted: rgba(255, 255, 255, 0.92);
+  --glass-rim-dark: rgba(31, 38, 135, 0.18);
+  --glass-specular: rgba(255, 255, 255, 1);
+}
+
+/* ------------------------------------------------------------
+   1. LIQUID GLASS TRANSPARENCY — real color-mix interpolation
+   between the Clear and Tinted tokens above, so the slider produces
+   an actual continuous material change instead of a canned preset.
+   Also eases the blur/saturation slightly toward Tinted, since more
+   opaque glass needs less blur to stay legible — matching Apple's
+   "diffuses complex content" readability fix.
+   ------------------------------------------------------------ */
+.glass-panel {
+  background: color-mix(in srgb, var(--panel-bg-clear), var(--panel-bg-tinted) calc(var(--tint-mix) * 100%));
+  backdrop-filter: blur(calc(var(--blur-amount) * (1 - var(--tint-mix) * 0.35))) saturate(calc(160% - var(--tint-mix) * 25%));
+  -webkit-backdrop-filter: blur(calc(var(--blur-amount) * (1 - var(--tint-mix) * 0.35))) saturate(calc(160% - var(--tint-mix) * 25%));
+  /* Darkened outer rim + inner glow, layered on top of the existing
+     elevation shadows rather than replacing them. */
+  box-shadow: var(--card-glow), var(--glass-elevation-2), var(--glass-inner-shadow),
+              0 0 0 1px var(--glass-rim-dark),
+              inset 0 0 24px rgba(255, 255, 255, 0.02);
+  border-color: transparent;
+}
+
+/* Brighter specular highlight sweeping the top rim — replaces the
+   flatter 0.6-opacity line from the original system with a wider,
+   softer, brighter catch-light plus a second faint highlight tracing
+   the left edge, so panels read as curved glass, not a flat tint. */
+.glass-panel::after {
+  height: 2px;
+  filter: blur(0.5px);
+  background: linear-gradient(90deg, transparent 0%, var(--glass-specular) 50%, transparent 100%);
+  opacity: 0.85;
+}
+
+.glass-panel::before {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 1px),
+    linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 40%, rgba(255,255,255,0) 72%, rgba(255,255,255,0.04) 100%);
+}
+
+/* Smaller glass surfaces (rows, chips, the nav) get the same rim +
+   tint treatment but skip the heavier blur cost — mirrors the
+   .glass-panel-light performance rule already in the Motion Kit. */
+.settings-item-row,
+.request-card,
+.search-result-item {
+  box-shadow: 0 0 0 1px var(--glass-rim-dark);
+}
+
+/* ------------------------------------------------------------
+   2. PILL SILHOUETTES
+   Apple's controls in iOS 27 read as true capsules, not rounded
+   rectangles. Buttons, the search field, badges, tags and the
+   floating island move to a 999px radius; multi-line surfaces
+   (message bubbles, text areas) are intentionally left alone.
+   ------------------------------------------------------------ */
+.btn-primary,
+.btn-secondary {
+  border-radius: 999px;
+  padding: 15px 28px;
+}
+
+.glass-search-wrapper {
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.glass-search-input {
+  border-radius: 999px;
+}
+
+.add-friend-btn {
+  border-radius: 999px;
+}
+
+.unread-badge,
+.nav-badge {
+  border-radius: 999px;
+}
+
+.message-reaction-tag {
+  border-radius: 999px;
+}
+
+.apple-notification {
+  border-radius: 999px;
+  padding: 12px 20px 12px 12px;
+}
+
+.notification-icon {
+  border-radius: 999px;
+}
+
+.floating-nav {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--nav-bg-clear), var(--nav-bg-tinted) calc(var(--tint-mix) * 100%));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 0 0 1px var(--glass-rim-dark);
+}
+
+:root.light-mode .floating-nav {
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05), 0 0 0 1px var(--glass-rim-dark);
+}
+
+/* Accent picker sits inside its own pill capsule rather than
+   floating loose, echoing the grouped-pill controls Apple uses for
+   Camera / Control Center option rows in iOS 27. */
+.accent-picker {
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-rim-dark);
+}
+
+:root.light-mode .accent-picker {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+/* ------------------------------------------------------------
+   3. LIQUID GLASS TRANSPARENCY CONTROL (Settings)
+   Styled to match Apple's own Display & Brightness > Liquid Glass
+   slider: a full-width pill track, a round glass thumb with its own
+   specular highlight, and two preset pills (Clear / Tinted) above it.
+   ------------------------------------------------------------ */
+.glass-tint-presets {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.glass-preset-btn {
+  flex: 1;
+  padding: 10px 0;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-rim-dark);
+  transition: var(--transition-spring);
+}
+
+:root.light-mode .glass-preset-btn {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.glass-preset-btn:hover {
+  color: var(--text-color);
+  transform: translateY(-1px);
+}
+
+.glass-preset-btn.active {
+  color: #fff;
+  background: var(--accent-color);
+  border-color: transparent;
+  box-shadow: 0 4px 14px rgba(var(--accent-color-rgb), 0.35), inset 0 1px 0 rgba(255,255,255,0.25);
+}
+
+.glass-tint-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 4px 0 4px;
+}
+
+.glass-tint-slider-row svg {
+  width: 16px;
+  height: 16px;
+  fill: var(--text-muted);
+  flex-shrink: 0;
+}
+
+input[type="range"].glass-tint-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.22));
+  outline: none;
+  cursor: pointer;
+}
+
+:root.light-mode input[type="range"].glass-tint-slider {
+  background: linear-gradient(90deg, rgba(0,0,0,0.06), rgba(0,0,0,0.16));
+}
+
+input[type="range"].glass-tint-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3), 0 0 0 1px var(--glass-rim-dark), inset 0 1px 1px rgba(255,255,255,0.9);
+  transition: transform 0.18s cubic-bezier(0.25,0.8,0.25,1);
+}
+
+input[type="range"].glass-tint-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+
+input[type="range"].glass-tint-slider::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3), inset 0 1px 1px rgba(255,255,255,0.9);
+}
+
+.glass-tint-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Respect the "Spring Animations" toggle / reduced-motion for the
+   new preset pills exactly like the rest of the Motion Kit does. */
+.motion-reduced .glass-preset-btn,
+.motion-reduced input[type="range"].glass-tint-slider::-webkit-slider-thumb {
+  transition: none !important;
+}
+
+/* ============================================================
+   iOS 27 REFINEMENT PACK — v1.1 (Floating Nav Alignment Fix)
+   Two real bugs found on review:
+
+   1) COLLISION: the floating island nav is `position: fixed` at the
+      bottom of the viewport, but the messenger/profile/settings
+      cards were sized independently of it (`height: 85vh` with no
+      reserved clearance). On common desktop/laptop viewport heights
+      the nav pill visually overlapped the chat input row sitting
+      behind it — that's the misalignment in the screenshot.
+
+   2) ICON CENTERING: the nav items relied on flexbox alone; anchor/
+      div elements holding an inline SVG can pick up a 1-2px baseline
+      nudge from line-height in some renderers. Locking line-height
+      to 0 and the SVG to display:block removes that ambiguity so
+      every icon sits pixel-perfect center, every time.
+
+   Also fixes a cascade bug from the v1.0 pack: its unscoped
+   `.floating-nav` background rule landed after the mobile media
+   query in source order, so it was silently overriding the mobile-
+   specific opaque background. Reasserted below so mobile wins again.
+   ============================================================ */
+
+:root {
+  /* Total fixed vertical space the floating nav needs below any
+     centered card on desktop/tablet: item height + pill padding +
+     bottom offset + a comfortable breathing gap. */
+  --nav-clearance: 130px;
+}
+
+/* --- Pixel-perfect icon centering, all breakpoints --- */
+.floating-nav-item {
+  line-height: 0;
+}
+
+.floating-nav-item svg {
+  display: block;
+}
+
+/* --- Collision fix: desktop + tablet (centered-card layouts only;
+   phones at <=480px go full-bleed and are excluded below) --- */
+@media (min-width: 481px) {
+  body.has-floating-nav {
+    padding-bottom: var(--nav-clearance);
+  }
+
+  .app-container {
+    max-height: min(900px, calc(100vh - var(--nav-clearance) - 40px));
+  }
+
+  .profile-card,
+  .settings-wide-card {
+    max-height: min(85vh, calc(100vh - var(--nav-clearance) - 40px));
+  }
+}
+
+@media (max-width: 480px) {
+  /* Full-screen mobile cards already reserve their own clearance via
+     the padding-bottom rule further up this file — the desktop
+     reserve would just add unwanted dead space here. */
+  body.has-floating-nav {
+    padding-bottom: 0;
+  }
+
+  /* Restore the more opaque, lightly-blurred mobile nav background —
+     see note above about the v1.0 cascade bug. */
+  .floating-nav {
+    background: rgba(18, 18, 26, 0.94);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+  }
+
+  :root.light-mode .floating-nav {
+    background: rgba(255, 255, 255, 0.92);
+  }
 }
