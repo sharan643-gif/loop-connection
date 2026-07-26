@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loop Connection | Settings</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="features.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    .settings-wide-card {
+      width: 580px;
+      max-width: 95vw;
+      padding: 40px;
+      animation: intro-card 0.7s cubic-bezier(0.175, 0.885, 0.32, 1.2) forwards;
+      max-height: min(85vh, calc(100vh - var(--nav-clearance, 130px) - 40px));
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <!-- Aurora Background Blobs -->
+  <div class="aurora-bg">
+    <div class="aurora-blob blob-1"></div>
+    <div class="aurora-blob blob-2"></div>
+    <div class="aurora-blob blob-3"></div>
+    <div class="aurora-blob blob-4"></div>
+  </div>
+
+  <div class="settings-wide-card glass-panel">
+    <div class="auth-header" style="margin-bottom: 25px;">
+      <h1 class="auth-title">Settings</h1>
+      <p class="auth-subtitle">Configure spatial alerts and visual boards</p>
+    </div>
+
+    <form id="settings-form">
+
+      <!-- Liquid Glass transparency control (iOS 27) -->
+      <div class="settings-group">
+        <h3 class="settings-group-title">Liquid Glass</h3>
+        <div class="settings-item-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div class="settings-item-label" style="margin-bottom: 2px;">
+            <span class="settings-item-name">Transparency</span>
+            <span class="settings-item-description">Dial glass panels between fully clear and tinted, just like Display &amp; Brightness on-device</span>
+          </div>
+
+          <div class="glass-tint-presets">
+            <div class="glass-preset-btn" id="glass-preset-clear" data-preset="0">Clear</div>
+            <div class="glass-preset-btn" id="glass-preset-tinted" data-preset="1">Tinted</div>
+          </div>
+
+          <div class="glass-tint-slider-row">
+            <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+            <input type="range" class="glass-tint-slider" id="settings-glass-tint" min="0" max="100" value="50">
+            <span class="glass-tint-value" id="glass-tint-value">50%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Accent colors settings -->
+      <div class="settings-group">
+        <h3 class="settings-group-title">Accent Theme</h3>
+        <div class="settings-item-row">
+          <div class="settings-item-label">
+            <span class="settings-item-name">Accent Highlights</span>
+            <span class="settings-item-description">Choose your interactive visual signature color</span>
+          </div>
+          <div class="accent-picker">
+            <div class="accent-color-dot accent-blue" data-color="blue" title="Apple Blue"></div>
+            <div class="accent-color-dot accent-green" data-color="green" title="Forest Green"></div>
+            <div class="accent-color-dot accent-purple" data-color="purple" title="Royal Purple"></div>
+            <div class="accent-color-dot accent-pink" data-color="pink" title="Electric Pink"></div>
+            <div class="accent-color-dot accent-orange" data-color="orange" title="Neon Orange"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- General visual toggles -->
+      <div class="settings-group">
+        <h3 class="settings-group-title">Visual & Behavior</h3>
+        
+        <div class="settings-item-row">
+          <div class="settings-item-label">
+            <span class="settings-item-name">Light Theme</span>
+            <span class="settings-item-description">Switch from Dark mode to high-luminance frosted paneling</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="settings-theme">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="settings-item-row">
+          <div class="settings-item-label">
+            <span class="settings-item-name">Sound FX</span>
+            <span class="settings-item-description">Play high-fidelity synthesizer notes on sent/received events</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="settings-sounds" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="settings-item-row">
+          <div class="settings-item-label">
+            <span class="settings-item-name">Dynamic Island Alerts</span>
+            <span class="settings-item-description">Display floating notifications at the top of the interface</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="settings-alerts" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="settings-item-row">
+          <div class="settings-item-label">
+            <span class="settings-item-name">Spring Animations</span>
+            <span class="settings-item-description">Enable physics-based transition movements on cards and bubbles</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="settings-animations" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Cloud DB Integration parameters -->
+      <div class="settings-group">
+        <h3 class="settings-group-title">Cloud Database</h3>
+        
+        <div class="glass-input-wrapper" style="margin-top: 10px; margin-bottom: 12px;">
+          <label class="glass-label" for="settings-sb-url">Supabase Project URL</label>
+          <input type="url" id="settings-sb-url" class="glass-input" placeholder="https://xxxx.supabase.co">
+        </div>
+
+        <div class="glass-input-wrapper" style="margin-bottom: 15px;">
+          <label class="glass-label" for="settings-sb-key">Supabase Anon Key</label>
+          <input type="password" id="settings-sb-key" class="glass-input" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+        </div>
+      </div>
+
+      <button type="submit" class="btn-primary" style="margin-top: 10px;">
+        <span>Save Configurations</span>
+        <svg viewBox="0 0 24 24" style="width: 18px; height: 18px; fill: currentColor;"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
+      </button>
+    </form>
+  </div>
+
+  <!-- CDN scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="script.js"></script>
+  <script src="features.js"></script>
+</body>
+</html>
