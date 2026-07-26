@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>iMessage 27 | Settings</title>
+  <title>Loop Connection | Settings</title>
   <link rel="stylesheet" href="style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,7 +14,7 @@
       max-width: 95vw;
       padding: 40px;
       animation: intro-card 0.7s cubic-bezier(0.175, 0.885, 0.32, 1.2) forwards;
-      max-height: 85vh;
+      max-height: min(85vh, calc(100vh - var(--nav-clearance, 130px) - 40px));
       overflow-y: auto;
     }
   </style>
@@ -35,7 +35,29 @@
     </div>
 
     <form id="settings-form">
-      
+
+      <!-- Liquid Glass transparency control (iOS 27) -->
+      <div class="settings-group">
+        <h3 class="settings-group-title">Liquid Glass</h3>
+        <div class="settings-item-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div class="settings-item-label" style="margin-bottom: 2px;">
+            <span class="settings-item-name">Transparency</span>
+            <span class="settings-item-description">Dial glass panels between fully clear and tinted, just like Display &amp; Brightness on-device</span>
+          </div>
+
+          <div class="glass-tint-presets">
+            <div class="glass-preset-btn" id="glass-preset-clear" data-preset="0">Clear</div>
+            <div class="glass-preset-btn" id="glass-preset-tinted" data-preset="1">Tinted</div>
+          </div>
+
+          <div class="glass-tint-slider-row">
+            <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+            <input type="range" class="glass-tint-slider" id="settings-glass-tint" min="0" max="100" value="50">
+            <span class="glass-tint-value" id="glass-tint-value">50%</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Accent colors settings -->
       <div class="settings-group">
         <h3 class="settings-group-title">Accent Theme</h3>
